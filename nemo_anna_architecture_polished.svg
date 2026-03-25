@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">Nemo &amp; Anna Architecture</title>
+  <desc id="desc">A polished architecture diagram showing the flow from Action Model to Anna JSON to Nemo Engine to Matter Device, plus the identity and safety label layers.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1220"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+
+    <linearGradient id="flow1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="flow2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#14b8a6"/>
+      <stop offset="100%" stop-color="#0f766e"/>
+    </linearGradient>
+    <linearGradient id="flow3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#b45309"/>
+    </linearGradient>
+    <linearGradient id="flow4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#a855f7"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="6" refY="6" orient="auto">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="#cbd5e1"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="980" fill="url(#bg)"/>
+
+  <!-- Header -->
+  <text x="90" y="92" font-size="44" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#f8fafc">
+    Nemo &amp; Anna Architecture
+  </text>
+  <text x="90" y="132" font-size="22" font-family="Arial, Helvetica, sans-serif" fill="#cbd5e1">
+    Define actions in JSON. Generate Matter devices automatically.
+  </text>
+
+  <!-- Top flow title -->
+  <text x="90" y="190" font-size="26" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#f8fafc">
+    Core Flow
+  </text>
+
+  <!-- Flow cards -->
+  <g filter="url(#shadow)">
+    <rect x="90" y="230" width="320" height="190" rx="30" fill="url(#flow1)"/>
+    <rect x="450" y="230" width="320" height="190" rx="30" fill="url(#flow2)"/>
+    <rect x="810" y="230" width="320" height="190" rx="30" fill="url(#flow3)"/>
+    <rect x="1170" y="230" width="320" height="190" rx="30" fill="url(#flow4)"/>
+  </g>
+
+  <!-- Arrows between cards -->
+  <line x1="410" y1="325" x2="450" y2="325" stroke="#cbd5e1" stroke-width="8" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <line x1="770" y1="325" x2="810" y2="325" stroke="#cbd5e1" stroke-width="8" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <line x1="1130" y1="325" x2="1170" y2="325" stroke="#cbd5e1" stroke-width="8" stroke-linecap="round" marker-end="url(#arrow)"/>
+
+  <!-- Card 1 content -->
+  <text x="250" y="278" text-anchor="middle" font-size="28" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#ffffff">Action Model</text>
+  <text x="250" y="312" text-anchor="middle" font-size="17" font-family="Arial, Helvetica, sans-serif" fill="#dbeafe">9 execution questions</text>
+  <text x="125" y="350" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#eff6ff">• intent and effect</text>
+  <text x="125" y="378" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#eff6ff">• modes and triggers</text>
+  <text x="125" y="406" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#eff6ff">• limits and protections</text>
+
+  <!-- Card 2 content -->
+  <text x="610" y="278" text-anchor="middle" font-size="28" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#ffffff">Anna JSON</text>
+  <text x="610" y="312" text-anchor="middle" font-size="17" font-family="Arial, Helvetica, sans-serif" fill="#ccfbf1">Portable Action Specification</text>
+  <text x="485" y="350" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#f0fdfa">• hardware pins</text>
+  <text x="485" y="378" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#f0fdfa">• Matter clusters</text>
+  <text x="485" y="406" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#f0fdfa">• conditions and boundaries</text>
+
+  <!-- Card 3 content -->
+  <text x="970" y="278" text-anchor="middle" font-size="28" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#ffffff">Nemo Engine</text>
+  <text x="970" y="312" text-anchor="middle" font-size="17" font-family="Arial, Helvetica, sans-serif" fill="#fef3c7">ESP32-C6 Matter runtime</text>
+  <text x="845" y="350" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#fffbeb">• endpoint / cluster generation</text>
+  <text x="845" y="378" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#fffbeb">• commissioning (QR / BLE)</text>
+  <text x="845" y="406" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#fffbeb">• device state management</text>
+
+  <!-- Card 4 content -->
+  <text x="1330" y="278" text-anchor="middle" font-size="28" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#ffffff">Matter Device</text>
+  <text x="1330" y="312" text-anchor="middle" font-size="17" font-family="Arial, Helvetica, sans-serif" fill="#f3e8ff">Endpoint / Cluster runtime</text>
+  <text x="1205" y="350" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#faf5ff">• on/off-centered actions</text>
+  <text x="1205" y="378" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#faf5ff">• relays, valves, motors</text>
+  <text x="1205" y="406" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#faf5ff">• behavior updates without FW updates</text>
+
+  <!-- Divider -->
+  <line x1="90" y1="490" x2="1510" y2="490" stroke="#334155" stroke-width="2"/>
+
+  <!-- Bottom title -->
+  <text x="90" y="548" font-size="26" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#f8fafc">
+    Identity &amp; Safety Layer
+  </text>
+  <text x="90" y="582" font-size="18" font-family="Arial, Helvetica, sans-serif" fill="#cbd5e1">
+    Action meaning, user expression, and immutable safety boundaries
+  </text>
+
+  <!-- Bottom cards -->
+  <g filter="url(#shadow)">
+    <rect x="90" y="630" width="430" height="220" rx="28" fill="#111827" stroke="#334155" stroke-width="2"/>
+    <rect x="585" y="630" width="430" height="220" rx="28" fill="#111827" stroke="#334155" stroke-width="2"/>
+    <rect x="1080" y="630" width="430" height="220" rx="28" fill="#111827" stroke="#334155" stroke-width="2"/>
+  </g>
+
+  <!-- Bottom card 1 -->
+  <text x="305" y="690" text-anchor="middle" font-size="26" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#93c5fd">Label</text>
+  <text x="305" y="722" text-anchor="middle" font-size="17" font-family="Arial, Helvetica, sans-serif" fill="#cbd5e1">Action Identity</text>
+  <text x="125" y="765" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#e5e7eb">• manufacturer-defined semantic anchor</text>
+  <text x="125" y="794" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#e5e7eb">• stable meaning attached to each action</text>
+
+  <!-- Bottom card 2 -->
+  <text x="800" y="690" text-anchor="middle" font-size="26" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#5eead4">User Label</text>
+  <text x="800" y="722" text-anchor="middle" font-size="17" font-family="Arial, Helvetica, sans-serif" fill="#cbd5e1">User Expression</text>
+  <text x="620" y="765" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#e5e7eb">• default expression stored at creation</text>
+  <text x="620" y="794" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#e5e7eb">• users can add or modify labels</text>
+
+  <!-- Bottom card 3 -->
+  <text x="1295" y="690" text-anchor="middle" font-size="26" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#fca5a5">Fixed Label</text>
+  <text x="1295" y="722" text-anchor="middle" font-size="17" font-family="Arial, Helvetica, sans-serif" fill="#cbd5e1">Boundary</text>
+  <text x="1115" y="765" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#e5e7eb">• immutable safety metadata</text>
+  <text x="1115" y="794" font-size="16" font-family="Arial, Helvetica, sans-serif" fill="#e5e7eb">• AI-readable limits and operational intent</text>
+
+  <!-- Footer -->
+  <line x1="90" y1="900" x2="1510" y2="900" stroke="#334155" stroke-width="2"/>
+  <text x="90" y="942" font-size="22" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#f8fafc">
+    Anna defines the behavior. Nemo executes it.
+  </text>
+</svg>
