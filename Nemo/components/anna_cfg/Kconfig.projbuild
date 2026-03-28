@@ -1,0 +1,21 @@
+menu "Anna Config"
+
+    config ANNA_CFG_PARTITION_NAME
+        string "Partition name containing runtime Anna JSON"
+        default "cfg_data"
+    
+    # config ANNA_FCTRY_PARTITION_NAME
+    #     string "Partition name containing factory data"
+    #     default "fctry_data"
+    
+    # config ANNA_CFG_MAX_JSON_SIZE
+    #     int "Max JSON size (bytes) accepted from NVS"
+    #     default 32768
+    #     range 1024 65536
+    
+    # config ANNA_CFG_MAX_LABEL_LEN
+    #     int "Max label length"
+    #     default 48
+    #     range 8 128
+    
+    endmenu
