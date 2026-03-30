@@ -269,7 +269,7 @@ Safety boundaries
 {
   "label": "baby-mobile",
   "OutPin": 18,
-  "fixed_label": "safety-limited-rotation",
+  "safety": "limited-rotation",
   "mode": "nursery-mode",
   "max_sec": 1800,
   "not_on_pin": [12]
