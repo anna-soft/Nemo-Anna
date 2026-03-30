@@ -17,6 +17,134 @@ Define actions in JSON. Generate Matter devices automatically.
 > **Anna defines the behavior.  
 > Nemo executes it.**
 
+
+---
+
+## 🧠 Design Principles (for Developers)
+
+These are not just design principles.  
+They are instructions for how to build your system.
+
+---
+
+### 1) Action-first Architecture
+
+Do not start from the device.
+
+Start from the action.
+
+→ Define what the system should do  
+→ Then derive the device structure from it  
+
+If you begin with device types,  
+you will inherit unnecessary complexity.
+
+→ This leads to simpler models and better automation.
+
+---
+
+### 2) Reduction to Button / Switch
+
+Avoid creating complex device abstractions.
+
+Reduce all execution into two primitives:
+
+- **Button** → instant execution (pulse)  
+- **Switch** → persistent state (toggle)  
+
+If your system cannot be expressed using these two,  
+you are likely over-engineering it.
+
+→ Simpler primitives make systems easier to compose and debug.
+
+---
+
+### 3) Boundary-first Execution Model
+
+Do not execute first and handle failures later.
+
+Define boundaries before execution.
+
+→ What conditions must be satisfied?  
+→ What impact does this action have?  
+→ What conflicts must be prevented?  
+→ How long can it run?  
+
+Execution should only occur  
+after these conditions are defined.
+
+→ This prevents unpredictable behavior in physical systems.
+
+---
+
+### 4) Separation of UserLabel and FixedLabel
+
+Separate meaning from constraint.
+
+- **UserLabel** → what this action represents  
+- **FixedLabel** → the conditions and limits of execution  
+
+Do not mix identity and constraints.  
+They serve different purposes.
+
+---
+
+### 5) endpointLabel — Meaning over Structure
+
+Do not group endpoints by hardware structure.
+
+Use endpoints to represent meaningful units of action.
+
+→ One endpoint = one meaningful action  
+
+Design for understanding,  
+not for physical organization.
+
+---
+
+### 6) JSON as a Device Definition Language
+
+Do not treat JSON as a configuration file.
+
+Use it as a language to define behavior.
+
+→ Define actions  
+→ Define boundaries  
+→ Define execution conditions  
+
+Commissioning is not just connection.
+
+When a device is commissioned,  
+it transfers its full definition to the system.
+
+From that point, execution is not triggered by commands,  
+but by validation and approval of that definition.
+
+---
+
+### Example — Washing Machine
+
+Avoid defining the device as “a remotely controlled washing machine.”
+
+Instead, break it into actions:
+
+- Add one rinse  
+- Add one spin  
+- Set water temperature  
+
+Each action should be independently executable.
+
+→ One action = one endpoint  
+→ One endpoint = one meaning  
+
+This allows:
+
+- Flexible automation  
+- AI-driven composition  
+- Clear execution boundaries  
+
+→ This makes systems easier to automate, reason about, and extend.
+
 ---
 
 ## TL;DR (for developers)
@@ -203,5 +331,38 @@ Traditional automation systems often rely on device-specific logic, making integ
 Nemo & Anna define actions, conditions, and constraints in a structured format.
 
 This approach can be used by external systems, including AI-based tools, to better understand device behavior without relying on firmware-specific implementations.
+
+---
+
+## Why Nemo & Anna Exists
+
+Nemo & Anna redefines how physical devices are executed.
+
+Instead of control-based systems,  
+it introduces a definition-based execution model:
+
+**Definition → Validation → Approval → Execution**
+
+---
+
+## Boundary
+
+Boundary defines the allowed range of execution.
+
+It is declared by the device,  
+interpreted by the platform,  
+and used as input for execution decisions.
+
+---
+
+## 🔗 Related Project
+
+👉 https://github.com/Jang-woo-AnnaSoft/execution-boundaries
+
+---
+
+## 🌐 Project Overview
+
+👉 https://anna.software
 
 Nemo & Anna do not implement AI control, but expose machine-readable action definitions that can be utilized by other systems.
