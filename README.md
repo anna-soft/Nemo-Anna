@@ -8,8 +8,8 @@
 
 **Action-based Matter Device Platform**
 
-> We don’t program devices.
-> We define what they are allowed to do.
+> We don’t program devices.<br>
+> We define what they are allowed to do.<br>
 > A device is the result of validated actions, not commands.
 
 Define actions in JSON. Generate Matter devices automatically.
