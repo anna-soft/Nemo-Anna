@@ -308,13 +308,7 @@ Behavior changes without firmware updates
 
 Architecture Overview
 
-Action
-   ↓
-Anna JSON
-   ↓
-Nemo Firmware
-   ↓
-Matter Device
+Action → Anna JSON → Nemo Firmware → Matter Device
 
 ---
 
@@ -331,10 +325,10 @@ it introduces a definition-based execution model:
 
 ## Summary
 
-Anna defines the behavior.
-Nemo executes it.
-Define the action first.
-The device structure follows automatically.
+- Anna defines the behavior  
+- Nemo executes it  
+- Define the action first  
+- The device structure follows automatically  
 
 ---
 
