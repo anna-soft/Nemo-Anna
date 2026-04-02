@@ -8,7 +8,9 @@
 
 **Action-based Matter Device Platform**
 
-*An Action-first approach to building Matter devices.*
+> We don’t program devices.
+> We define what they are allowed to do.
+> A device is the result of validated actions, not commands.
 
 Define actions in JSON. Generate Matter devices automatically.
 
@@ -228,7 +230,14 @@ endpointLabel represents the primary identity of the endpoint
 ---
 
 ## Safety (Fixed Label Based)
-Safety is applied using **Fixed Label (0x0040)**.
+
+Boundary defines the allowed range of execution.
+
+It is declared by the device,  
+interpreted by the platform,  
+and used as input for execution decisions.
+
+Boundary is applied using **Fixed Label (0x0040)**.
 
 **Definition (Anna JSON)**
 ```json
@@ -295,12 +304,6 @@ Device state management
 JSON-defined device behavior
 Behavior changes without firmware updates
 
-Supported action-based devices:
-relays
-valves
-simple motors
-power control systems
-
 ---
 
 Architecture Overview
@@ -312,6 +315,17 @@ Anna JSON
 Nemo Firmware
    ↓
 Matter Device
+
+---
+
+## Why Nemo & Anna Exists
+
+Nemo & Anna redefines how physical devices are executed.
+
+Instead of control-based systems,  
+it introduces a definition-based execution model:
+
+**Definition → Validation → Approval → Execution**
 
 ---
 
@@ -331,27 +345,6 @@ Traditional automation systems often rely on device-specific logic, making integ
 Nemo & Anna define actions, conditions, and constraints in a structured format.
 
 This approach can be used by external systems, including AI-based tools, to better understand device behavior without relying on firmware-specific implementations.
-
----
-
-## Why Nemo & Anna Exists
-
-Nemo & Anna redefines how physical devices are executed.
-
-Instead of control-based systems,  
-it introduces a definition-based execution model:
-
-**Definition → Validation → Approval → Execution**
-
----
-
-## Boundary
-
-Boundary defines the allowed range of execution.
-
-It is declared by the device,  
-interpreted by the platform,  
-and used as input for execution decisions.
 
 ---
 
