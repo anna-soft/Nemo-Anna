@@ -6,6 +6,22 @@
 ![Action-First](https://img.shields.io/badge/Architecture-Action--First-111827)
 ![License](https://img.shields.io/badge/License-TBD-lightgrey)
 
+> This work is not intended to criticize existing platforms such as Matter.  
+> It is a contribution toward making these ecosystems safer and more scalable as AI-driven control emerges.
+
+## Scope of This Repository
+
+The problem and motivation are described in the previous document.
+
+If you are new to this topic, we recommend starting here:  
+👉 https://github.com/Jang-woo-AnnaSoft/execution-boundaries/
+
+This repository focuses on **execution**.
+
+We do not repeat the problem here.  
+Instead, we define how actions should be structured, validated, and executed.
+
+
 **Action-based Matter Device Platform**
 
 > We don’t program devices.<br>
