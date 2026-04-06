@@ -16,7 +16,7 @@ The problem and motivation are described in the previous document.
 If you are new to this topic, we recommend starting here:  
 👉 https://github.com/Jang-woo-AnnaSoft/execution-boundaries/
 
-This repository focuses on **execution**.
+This repository focuses on how physical actions are represented **between devices and platforms**.
 
 We do not repeat the problem here.  
 Instead, we define how actions should be structured, validated, and executed.
