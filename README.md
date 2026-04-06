@@ -358,14 +358,15 @@ This approach can be used by external systems, including AI-based tools, to bett
 
 ---
 
-## 🔗 Related Project
-
-👉 https://github.com/Jang-woo-AnnaSoft/execution-boundaries
-
----
-
 ## 🌐 Project Overview
 
 👉 https://anna.software
 
-Nemo & Anna do not implement AI control, but expose machine-readable action definitions that can be utilized by other systems.
+This project defines **what actions are allowed, when they are allowed, and how they should behave**.
+
+With just **9 structured questions**, a complete device behavior can be defined.
+
+This is not a concept.  
+**It is already implemented.**
+
+Scan a QR code on a Matter-enabled platform, and the device works immediately.
