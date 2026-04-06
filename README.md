@@ -21,6 +21,7 @@ This repository focuses on how physical actions are represented **between device
 We do not repeat the problem here.  
 Instead, we define how actions should be structured, validated, and executed.
 
+---
 
 **Action-based Matter Device Platform**
 
@@ -187,14 +188,14 @@ This allows:
 
 ## Why Start from Actions Instead of Devices
 
-Traditional IoT platforms usually follow this process:
-Select Device Type
-→ Add options
+Traditional IoT platforms usually follow this process:  
+Select Device Type  
+→ Add options  
 → Map GPIO
 
-Nemo & Anna start from the opposite direction:
-Define Action
-→ Declare safety conditions
+Nemo & Anna start from the opposite direction:  
+Define Action  
+→ Declare safety conditions  
 → Generate device structure
 
 Instead of defining **what a device is**, we define **what a device does**.
@@ -237,11 +238,11 @@ Identity is applied using **User Label (0x0041)**.
 
 **Rules**
 
-Each endpoint MUST have exactly one endpointLabel
-The value MUST match the Anna JSON Label
-endpointLabel MUST be stored in User **Label (0x0041)**
-endpointLabel represents the primary identity of the endpoint
-**User Label MUST contain only one entry per endpoint**
+- Each endpoint MUST have exactly one endpointLabel
+- The value MUST match the Anna JSON Label
+- endpointLabel MUST be stored in User **Label (0x0041)**
+- endpointLabel represents the primary identity of the endpoint
+- **User Label MUST contain only one entry per endpoint**
 
 ---
 
@@ -270,6 +271,7 @@ Boundary is applied using **Fixed Label (0x0040)**.
 - Fixed Labels MUST be read-only
 - Fixed Labels MUST NOT be modified by users
 - Multiple Fixed Labels MAY exist per endpoint
+ 
 ---
 
 ## Anna
@@ -301,45 +303,32 @@ Safety boundaries
 }
 ```
 
-This JSON contains answers to the Action questions:
-max_sec → automatic stop after 30 minutes (Responsibility Limit)
+This JSON contains answers to the Action questions:  
+max_sec → automatic stop after 30 minutes (Responsibility Limit)  
 not_on_pin → execution blocked while heater is active (Start Interference)
 
 ---
 
 ## Nemo
 
-**ESP32-C6 Matter Runtime Engine**
-Nemo is a Matter firmware runtime for ESP32-C6.
+**ESP32-C6 Matter Runtime Engine**  
+
+Nemo is a Matter firmware runtime for ESP32-C6.  
 It generates Matter devices from Anna JSON.
 
-**Core responsibilities**
-Automatic Endpoint / Cluster configuration
-Matter Commissioning (QR / BLE)
-Device state management
-JSON-defined device behavior
+**Core responsibilities**  
+
+Automatic Endpoint / Cluster configuration  
+Matter Commissioning (QR / BLE)  
+Device state management  
+JSON-defined device behavior  
 Behavior changes without firmware updates
 
 ---
 
-Architecture Overview
-
-Action → Anna JSON → Nemo Firmware → Matter Device
-
----
-
-## Why Nemo & Anna Exists
-
-Nemo & Anna redefines how physical devices are executed.
-
-Instead of control-based systems,  
-it introduces a definition-based execution model:
+## Summary
 
 **Definition → Validation → Approval → Execution**
-
----
-
-## Summary
 
 - Anna defines the behavior  
 - Nemo executes it  
@@ -362,11 +351,12 @@ This approach can be used by external systems, including AI-based tools, to bett
 
 👉 https://anna.software
 
-This project defines **what actions are allowed, when they are allowed, and how they should behave**.
+This project defines **what actions are allowed, when they are allowed, and how they should behave**.  
 With just 9 structured questions, a complete device behavior can be defined.
 
 This is not a concept.
 **It is already implemented.**
 
 AI does not need to guess anymore.
+
 Scan a QR code on a Matter-enabled platform, and the device works immediately.
