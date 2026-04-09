@@ -49,6 +49,14 @@ static void con_btn_pulse_timer_handler(chip::System::Layer *, void *);
 static void con_swt_as_eval_timer_handler(chip::System::Layer *, void *);
 static void con_swt_as_debounce_timer_handler(chip::System::Layer *, void *);
 static bool any_con_swt_on();
+static bool any_con_swt_logically_on_with_as();
+static bool con_swt_item_is_logically_on(int idx);
+static bool con_swt_endpoint_is_logically_on(uint16_t endpoint_id);
+static void con_swt_refresh_as_eval_timer();
+static bool con_swt_force_gpio_off_by_index(int idx);
+static bool con_swt_drive_gpio_on_by_index(int idx);
+static bool con_swt_request_gpio_off_by_index(int idx);
+static void con_swt_group_reconcile_work(intptr_t);
 
 led_controller_handle_t g_led_handle = NULL;
 
@@ -142,7 +150,6 @@ static bool con_btn_group_abort_is_active(uint16_t ep)
 // ---- ConBtn AS presence helpers ----
 enum class con_btn_group_run_mode : uint8_t {
     pulse = 0,
-    timed_hold,
     conditional_hold,
 };
 
@@ -172,39 +179,11 @@ static bool con_btn_item_has_as_config(int idx)
     return false;
 }
 
-static con_btn_group_run_mode con_btn_group_mode_for_endpoint(uint16_t ep)
-{
-    bool has_runtime_condition = false;
-    bool has_max_sec = false;
-
-    for (int i = 0; i < g_anna_cfg.con_btn_cnt; ++i) {
-        if (g_anna_cfg.con_btn[i].base.endpoint_id != ep) {
-            continue;
-        }
-        if (g_anna_cfg.con_btn[i].mode_idx >= 0 || con_btn_item_has_bs_config(i) || con_btn_item_has_as_config(i)) {
-            has_runtime_condition = true;
-        }
-        if ((int32_t)g_anna_cfg.con_btn[i].max_sec >= 0) {
-            has_max_sec = true;
-        }
-    }
-
-    if (has_runtime_condition) {
-        return con_btn_group_run_mode::conditional_hold;
-    }
-    if (has_max_sec) {
-        return con_btn_group_run_mode::timed_hold;
-    }
-    return con_btn_group_run_mode::pulse;
-}
-
 static const char * con_btn_group_mode_name(con_btn_group_run_mode mode)
 {
     switch (mode) {
     case con_btn_group_run_mode::pulse:
         return "pulse";
-    case con_btn_group_run_mode::timed_hold:
-        return "timed_hold";
     case con_btn_group_run_mode::conditional_hold:
         return "conditional_hold";
     default:
@@ -249,6 +228,41 @@ static bool con_btn_bs_conditions_ok(int idx);
 // Hook declarations are provided by app_priv.h
 static void con_btn_as_debounce_timer_handler(chip::System::Layer *, void *);
 static void con_btn_pulse_timer_handler(chip::System::Layer *, void *);
+
+static bool con_btn_item_hold_conditions_ok(int idx)
+{
+    return con_btn_bs_conditions_ok(idx) && con_btn_as_conditions_ok(idx);
+}
+
+static bool con_btn_item_pre_on_conditions_ok(int idx)
+{
+    if (idx < 0 || idx >= g_anna_cfg.con_btn_cnt) {
+        return false;
+    }
+    int req_mode = g_anna_cfg.con_btn[idx].mode_idx;
+    bool mode_ok = (req_mode < 0) || (g_anna_cfg.on_mode == req_mode);
+    return mode_ok && con_btn_item_hold_conditions_ok(idx);
+}
+
+static con_btn_group_run_mode con_btn_group_mode_for_endpoint(uint16_t ep)
+{
+    bool has_hold_source = false;
+
+    for (int i = 0; i < g_anna_cfg.con_btn_cnt; ++i) {
+        if (g_anna_cfg.con_btn[i].base.endpoint_id != ep) {
+            continue;
+        }
+        if (con_btn_item_has_bs_config(i) || con_btn_item_has_as_config(i)) {
+            has_hold_source = true;
+            break;
+        }
+    }
+
+    if (has_hold_source) {
+        return con_btn_group_run_mode::conditional_hold;
+    }
+    return con_btn_group_run_mode::pulse;
+}
 // ConSwt forward decls
 static void con_swt_cooldown_release_timer_handler(chip::System::Layer *, void *);
 static void con_swt_as_eval_timer_handler(chip::System::Layer *, void *);
@@ -261,8 +275,11 @@ static void con_swt_try_pending_offs_work(intptr_t);
 // ConSwt group reconcile (endpoint-level OR across items)
 extern "C" void app_driver_con_swt_group_reconcile_by_endpoint(uint16_t endpoint_id)
 {
-    // No-op by design: Event paths must not auto-ON. Group reconcile is only used in PRE path.
-    (void)endpoint_id;
+    if (endpoint_id == ENDPOINT_ID_INVALID) {
+        return;
+    }
+    uintptr_t packed = static_cast<uintptr_t>(endpoint_id);
+    chip::DeviceLayer::PlatformMgr().ScheduleWork(con_swt_group_reconcile_work, (intptr_t)packed);
 }
 /* Maintain-only group ON for ConBtn: if the endpoint group is already physically/logically ON
  * (any item is_on=true) and any sibling still satisfies AND conditions, re-assert all group pins ON
@@ -286,17 +303,13 @@ extern "C" bool app_driver_con_btn_maintain_group_on_if_satisfied(uint16_t endpo
     if (!any_on_in_group) {
         return false; // do not create ON from fully-OFF state
     }
-    // Evaluate if any item is currently satisfied (AND of Mode/BS/AS)
+    // Evaluate if any item still satisfies hold conditions (BS/AS only).
     bool any_satisfied = false;
     pin_mask_t group_not_on_mask = 0;
     for (int i = 0; i < g_anna_cfg.con_btn_cnt; ++i) {
         if (g_anna_cfg.con_btn[i].base.endpoint_id != endpoint_id) { continue; }
         group_not_on_mask |= g_anna_cfg.con_btn[i].base.not_on_mask;
-        int m = g_anna_cfg.con_btn[i].mode_idx;
-        bool mode_ok = (m < 0) || (g_anna_cfg.on_mode == m);
-        bool bs_ok = con_btn_bs_conditions_ok(i);
-        bool as_ok = con_btn_as_conditions_ok(i);
-        if (mode_ok && bs_ok && as_ok) { any_satisfied = true; }
+        if (con_btn_item_hold_conditions_ok(i)) { any_satisfied = true; }
     }
     if (!any_satisfied) {
         return false;
@@ -684,12 +697,8 @@ static void con_btn_as_eval_timer_handler(chip::System::Layer *, void *)
             continue;
         }
         has_active = true;
-        // Re-evaluate conditions (mode, bs, as)
-        bool mode_ok = (g_anna_cfg.con_btn[c].mode_idx < 0) || (g_anna_cfg.on_mode == g_anna_cfg.con_btn[c].mode_idx);
-        bool bs_ok = con_btn_bs_conditions_ok(c);
-        bool as_ok = con_btn_as_conditions_ok(c);
-        bool cond_ok = mode_ok && bs_ok && as_ok;
-        if (!cond_ok) {
+        bool hold_ok = con_btn_item_hold_conditions_ok(c);
+        if (!hold_ok) {
             if (!s_as_db_timer_armed[c]) {
                 s_as_db_timer_armed[c] = true;
                 void * ctx = reinterpret_cast<void *>(static_cast<uintptr_t>(static_cast<uint16_t>(c))); 
@@ -698,14 +707,14 @@ static void con_btn_as_eval_timer_handler(chip::System::Layer *, void *)
                     chip::System::Clock::Milliseconds32(50),
                     con_btn_as_debounce_timer_handler,
                     ctx);
-                ESP_LOGI(TAG, "ConBtn AS debounce timer armed: idx=%d 50ms", c);
+                ESP_LOGI(TAG, "ConBtn AS debounce timer armed: idx=%d 50ms hold_ok=0", c);
             }
         } else {
             if (s_as_db_timer_armed[c]) {
                 void * ctx = reinterpret_cast<void *>(static_cast<uintptr_t>(static_cast<uint16_t>(c)));
                 chip::DeviceLayer::SystemLayer().CancelTimer(con_btn_as_debounce_timer_handler, ctx);
                 s_as_db_timer_armed[c] = false;
-                ESP_LOGI(TAG, "ConBtn AS debounce timer canceled: idx=%d (cond ok)", c);
+                ESP_LOGI(TAG, "ConBtn AS debounce timer canceled: idx=%d hold_ok=1", c);
             }
         }
     }
@@ -732,17 +741,14 @@ static void con_btn_as_debounce_timer_handler(chip::System::Layer *, void * ctx)
     if (!g_anna_cfg.con_btn[idx].is_on) {
         return;
     }
-    bool mode_ok = (g_anna_cfg.con_btn[idx].mode_idx < 0) || (g_anna_cfg.on_mode == g_anna_cfg.con_btn[idx].mode_idx);
-    bool bs_ok = con_btn_bs_conditions_ok((int)idx);
-    bool as_ok = con_btn_as_conditions_ok((int)idx);
-    bool cond_ok = mode_ok && bs_ok && as_ok;
-    if (!cond_ok) {
+    bool hold_ok = con_btn_item_hold_conditions_ok((int)idx);
+    if (!hold_ok) {
         // Maintain-only: if any sibling still satisfied and group is already ON, keep group ON (no attribute re-pulse)
         uint16_t ep = g_anna_cfg.con_btn[idx].base.endpoint_id;
         if (app_driver_con_btn_maintain_group_on_if_satisfied(ep)) {
             return;
         }
-        ESP_LOGW(TAG, "ConBtn AS debounce -> FORCE OFF: idx=%d", (int)idx);
+        ESP_LOGW(TAG, "ConBtn AS debounce -> FORCE OFF: idx=%d hold_ok=0", (int)idx);
         con_btn_execute_off((int)idx);
     }
 }
@@ -879,22 +885,6 @@ extern "C" void app_driver_con_btn_force_off_by_index(int idx)
     chip::DeviceLayer::PlatformMgr().ScheduleWork(con_btn_execute_off_work, (intptr_t)packed);
 }
 
-static void con_swt_arm_as_eval_work(intptr_t)
-{
-    // Arm periodic eval while any con_swt output is currently ON.
-    if (!any_con_swt_on()) {
-        return;
-    }
-    if (!s_con_swt_as_timer_armed) {
-        s_con_swt_as_timer_armed = true;
-        chip::DeviceLayer::SystemLayer().StartTimer(
-            chip::System::Clock::Milliseconds32(k_as_eval_ms),
-            con_swt_as_eval_timer_handler,
-            nullptr);
-        ESP_LOGI(TAG, "ConSwt AS periodic eval armed: %u ms", (unsigned)k_as_eval_ms);
-    }
-}
-
 // ConSwt helpers
 static bool con_swt_bs_conditions_ok(int idx)
 {
@@ -915,6 +905,37 @@ static bool con_swt_bs_conditions_ok(int idx)
         }
     }
     return true;
+}
+
+static bool con_swt_item_has_as_config(int idx)
+{
+    if (idx < 0 || idx >= g_anna_cfg.con_swt_cnt) {
+        return false;
+    }
+    for (int ai = 0; ai < ANNA_MAX_CON_AS_COUNT; ++ai) {
+        if (g_anna_cfg.con_swt[idx].as_pin[ai] >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool con_swt_endpoint_is_logically_on(uint16_t endpoint_id)
+{
+    if (endpoint_id == ENDPOINT_ID_INVALID) {
+        return false;
+    }
+    bool logical_on = false;
+    (void) OnOff::Attributes::OnOff::Get(endpoint_id, &logical_on);
+    return logical_on;
+}
+
+static bool con_swt_item_is_logically_on(int idx)
+{
+    if (idx < 0 || idx >= g_anna_cfg.con_swt_cnt) {
+        return false;
+    }
+    return con_swt_endpoint_is_logically_on(g_anna_cfg.con_swt[idx].base.endpoint_id);
 }
 
 static bool con_swt_is_on_by_pin(int idx)
@@ -938,6 +959,129 @@ static bool any_con_swt_on()
         }
     }
     return false;
+}
+
+static bool any_con_swt_logically_on_with_as()
+{
+    for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
+        if (!con_swt_item_has_as_config(i)) {
+            continue;
+        }
+        if (con_swt_item_is_logically_on(i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void con_swt_refresh_as_eval_timer()
+{
+    bool need_eval = any_con_swt_logically_on_with_as();
+    if (need_eval) {
+        if (!s_con_swt_as_timer_armed) {
+            s_con_swt_as_timer_armed = true;
+            chip::DeviceLayer::SystemLayer().StartTimer(
+                chip::System::Clock::Milliseconds32(k_as_eval_ms),
+                con_swt_as_eval_timer_handler,
+                nullptr);
+            ESP_LOGI(TAG, "ConSwt AS periodic eval armed: %u ms", (unsigned)k_as_eval_ms);
+        }
+        return;
+    }
+    if (s_con_swt_as_timer_armed) {
+        chip::DeviceLayer::SystemLayer().CancelTimer(con_swt_as_eval_timer_handler, nullptr);
+        s_con_swt_as_timer_armed = false;
+        ESP_LOGI(TAG, "ConSwt AS periodic eval disarmed (no logical ON with AS)");
+    }
+}
+
+static bool con_swt_force_gpio_off_by_index(int idx)
+{
+    if (idx < 0 || idx >= g_anna_cfg.con_swt_cnt) {
+        return false;
+    }
+    if (idx < ANNA_MAX_CON_SWT_ACT) {
+        void * db_ctx = reinterpret_cast<void *>(static_cast<uintptr_t>(static_cast<uint16_t>(idx)));
+        chip::DeviceLayer::SystemLayer().CancelTimer(con_swt_as_debounce_timer_handler, db_ctx);
+        s_con_swt_as_db_timer_armed[idx] = false;
+        s_con_swt_off_pending[idx] = false;
+        s_con_swt_off_block_logged[idx] = false;
+    }
+    bool was_on = con_swt_is_on_by_pin(idx);
+    int pin_no = (int)g_anna_cfg.con_swt[idx].base.pin_no;
+    gpio_num_t gpio = static_cast<gpio_num_t>(pin_no);
+    if (GPIO_IS_VALID_GPIO(gpio)) {
+        if (!s_con_swt_gpio_inited[idx]) {
+            gpio_reset_pin(gpio);
+            gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
+            s_con_swt_gpio_inited[idx] = true;
+            ESP_LOGW(TAG, "ConSwt GPIO late-init(force off): idx=%d pin=%d", idx, pin_no);
+        }
+        gpio_set_level(gpio, 0);
+    }
+    if (pin_no >= 0 && pin_no < 32) {
+        update_on_pin_mask((uint8_t)pin_no, false);
+    }
+    return was_on;
+}
+
+static bool con_swt_drive_gpio_on_by_index(int idx)
+{
+    if (idx < 0 || idx >= g_anna_cfg.con_swt_cnt) {
+        return false;
+    }
+    if (idx < ANNA_MAX_CON_SWT_ACT) {
+        void * db_ctx = reinterpret_cast<void *>(static_cast<uintptr_t>(static_cast<uint16_t>(idx)));
+        chip::DeviceLayer::SystemLayer().CancelTimer(con_swt_as_debounce_timer_handler, db_ctx);
+        s_con_swt_as_db_timer_armed[idx] = false;
+        s_con_swt_off_pending[idx] = false;
+        s_con_swt_off_block_logged[idx] = false;
+    }
+    bool was_on = con_swt_is_on_by_pin(idx);
+    int pin_no = (int)g_anna_cfg.con_swt[idx].base.pin_no;
+    gpio_num_t gpio = static_cast<gpio_num_t>(pin_no);
+    if (GPIO_IS_VALID_GPIO(gpio)) {
+        if (!s_con_swt_gpio_inited[idx]) {
+            gpio_reset_pin(gpio);
+            gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
+            s_con_swt_gpio_inited[idx] = true;
+            ESP_LOGW(TAG, "ConSwt GPIO late-init(reconcile on): idx=%d pin=%d", idx, pin_no);
+        }
+        gpio_set_level(gpio, 1);
+    }
+    if (pin_no >= 0 && pin_no < 32) {
+        update_on_pin_mask((uint8_t)pin_no, true);
+    }
+    return !was_on;
+}
+
+static bool con_swt_request_gpio_off_by_index(int idx)
+{
+    if (idx < 0 || idx >= g_anna_cfg.con_swt_cnt) {
+        return false;
+    }
+    if (!con_swt_is_on_by_pin(idx)) {
+        if (idx < ANNA_MAX_CON_SWT_ACT) {
+            s_con_swt_off_pending[idx] = false;
+            s_con_swt_off_block_logged[idx] = false;
+        }
+        return false;
+    }
+    if ((g_anna_cfg.on_pin & g_anna_cfg.con_swt[idx].base.not_off_mask) != 0) {
+        if (idx < ANNA_MAX_CON_SWT_ACT) {
+            s_con_swt_off_pending[idx] = true;
+            if (!s_con_swt_off_block_logged[idx]) {
+                ESP_LOGW(TAG,
+                         "ConSwt runtime OFF blocked by not_off_mask: idx=%d on_pin=0x%08x mask=0x%08x",
+                         idx,
+                         (unsigned)g_anna_cfg.on_pin,
+                         (unsigned)g_anna_cfg.con_swt[idx].base.not_off_mask);
+                s_con_swt_off_block_logged[idx] = true;
+            }
+        }
+        return false;
+    }
+    return con_swt_force_gpio_off_by_index(idx);
 }
 
 static bool con_swt_as_conditions_ok(int idx)
@@ -994,12 +1138,101 @@ static bool con_swt_all_conditions_ok(int idx, bool * mode_ok_out, bool * bs_ok_
     return mode_ok && bs_ok && as_ok;
 }
 
+static bool con_swt_group_any_satisfied(uint16_t endpoint_id, pin_mask_t * group_not_on_mask_out,
+                                        pin_mask_t * group_not_off_mask_out)
+{
+    pin_mask_t group_not_on_mask = 0;
+    pin_mask_t group_not_off_mask = 0;
+    bool any_satisfied = false;
+    for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
+        if (g_anna_cfg.con_swt[i].base.endpoint_id != endpoint_id) {
+            continue;
+        }
+        group_not_on_mask |= g_anna_cfg.con_swt[i].base.not_on_mask;
+        group_not_off_mask |= g_anna_cfg.con_swt[i].base.not_off_mask;
+        if (con_swt_all_conditions_ok(i, nullptr, nullptr, nullptr)) {
+            any_satisfied = true;
+        }
+    }
+    if (group_not_on_mask_out != nullptr) {
+        *group_not_on_mask_out = group_not_on_mask;
+    }
+    if (group_not_off_mask_out != nullptr) {
+        *group_not_off_mask_out = group_not_off_mask;
+    }
+    return any_satisfied;
+}
+
+static void con_swt_group_reconcile_work(intptr_t arg)
+{
+    uint16_t endpoint_id = static_cast<uint16_t>(static_cast<uintptr_t>(arg) & 0xFFFF);
+    if (endpoint_id == ENDPOINT_ID_INVALID) {
+        return;
+    }
+
+    bool logical_on = con_swt_endpoint_is_logically_on(endpoint_id);
+    if (!logical_on) {
+        bool any_forced_off = false;
+        for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
+            if (g_anna_cfg.con_swt[i].base.endpoint_id != endpoint_id) {
+                continue;
+            }
+            any_forced_off |= con_swt_force_gpio_off_by_index(i);
+        }
+        con_swt_refresh_as_eval_timer();
+        ESP_LOGI(TAG, "ConSwt reconcile: ep=%u logical_on=0 forced_gpio_off=%d",
+                 (unsigned)endpoint_id, any_forced_off ? 1 : 0);
+        return;
+    }
+
+    pin_mask_t group_not_on_mask = 0;
+    pin_mask_t group_not_off_mask = 0;
+    bool any_satisfied = con_swt_group_any_satisfied(endpoint_id, &group_not_on_mask, &group_not_off_mask);
+    bool blocked_by_not_on = ((g_anna_cfg.on_pin & group_not_on_mask) != 0);
+
+    if (any_satisfied && !blocked_by_not_on) {
+        bool any_gpio_on = false;
+        for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
+            if (g_anna_cfg.con_swt[i].base.endpoint_id != endpoint_id) {
+                continue;
+            }
+            any_gpio_on |= con_swt_drive_gpio_on_by_index(i);
+        }
+        con_swt_refresh_as_eval_timer();
+        ESP_LOGI(TAG, "ConSwt reconcile: ep=%u logical_on=1 any_satisfied=1 gpio_on=%d",
+                 (unsigned)endpoint_id, any_gpio_on ? 1 : 0);
+        return;
+    }
+
+    bool any_gpio_off = false;
+    bool pending_off = false;
+    for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
+        if (g_anna_cfg.con_swt[i].base.endpoint_id != endpoint_id) {
+            continue;
+        }
+        any_gpio_off |= con_swt_request_gpio_off_by_index(i);
+        if (i < ANNA_MAX_CON_SWT_ACT && s_con_swt_off_pending[i]) {
+            pending_off = true;
+        }
+    }
+    con_swt_refresh_as_eval_timer();
+    ESP_LOGI(TAG,
+             "ConSwt reconcile: ep=%u logical_on=1 any_satisfied=%d blocked_by_not_on=%d pending_off=%d gpio_off=%d group_not_off_mask=0x%08x",
+             (unsigned)endpoint_id,
+             any_satisfied ? 1 : 0,
+             blocked_by_not_on ? 1 : 0,
+             pending_off ? 1 : 0,
+             any_gpio_off ? 1 : 0,
+             (unsigned)group_not_off_mask);
+}
+
 static void con_swt_as_eval_timer_handler(chip::System::Layer *, void *)
 {
-    bool has_active = false;
+    uint16_t ep_list[ANNA_MAX_CON_SWT_ACT] = {};
+    int ep_count = 0;
     for (int c = 0; c < g_anna_cfg.con_swt_cnt; ++c) {
-        if (!con_swt_is_on_by_pin(c)) { continue; }
-        has_active = true;
+        if (!con_swt_item_is_logically_on(c)) { continue; }
+        if (!con_swt_item_has_as_config(c)) { continue; }
         bool mode_ok = false;
         bool bs_ok = false;
         bool as_ok = false;
@@ -1036,14 +1269,23 @@ static void con_swt_as_eval_timer_handler(chip::System::Layer *, void *)
                          bs_ok ? 1 : 0,
                          as_ok ? 1 : 0);
             }
-            // Only clear pending when ALL conditions are ok (pending can be set by Mode/BS paths when blocked by not_off_mask).
-            if (s_con_swt_off_pending[c] && cond_ok) {
-                s_con_swt_off_pending[c] = false;
-                s_con_swt_off_block_logged[c] = false;
+            uint16_t ep = g_anna_cfg.con_swt[c].base.endpoint_id;
+            bool seen = false;
+            for (int i = 0; i < ep_count; ++i) {
+                if (ep_list[i] == ep) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen && ep != ENDPOINT_ID_INVALID && ep_count < ANNA_MAX_CON_SWT_ACT) {
+                ep_list[ep_count++] = ep;
             }
         }
     }
-    if (has_active && any_con_swt_on()) {
+    for (int i = 0; i < ep_count; ++i) {
+        app_driver_con_swt_group_reconcile_by_endpoint(ep_list[i]);
+    }
+    if (any_con_swt_logically_on_with_as()) {
         chip::DeviceLayer::SystemLayer().StartTimer(
             chip::System::Clock::Milliseconds32(k_as_eval_ms),
             con_swt_as_eval_timer_handler,
@@ -1058,41 +1300,21 @@ static void con_swt_as_debounce_timer_handler(chip::System::Layer *, void * ctx)
     uint16_t idx = static_cast<uint16_t>(reinterpret_cast<uintptr_t>(ctx) & 0xFFFF);
     if (idx >= g_anna_cfg.con_swt_cnt) { return; }
     s_con_swt_as_db_timer_armed[idx] = false;
-    if (!con_swt_is_on_by_pin(idx)) { return; }
+    if (!con_swt_item_is_logically_on(idx)) { return; }
     bool mode_ok = false;
     bool bs_ok = false;
     bool as_ok = false;
     bool cond_ok = con_swt_all_conditions_ok((int)idx, &mode_ok, &bs_ok, &as_ok);
     if (!cond_ok) {
-        // Maintain-only: if any sibling still satisfied and group is already ON, keep group ON
         uint16_t ep = g_anna_cfg.con_swt[idx].base.endpoint_id;
-        if (app_driver_con_swt_maintain_group_on_if_satisfied(ep)) {
-            return;
-        }
-        // If OFF is blocked by not_off_mask, mark pending and suppress repeated debounce
-        bool blocked = ((g_anna_cfg.on_pin & g_anna_cfg.con_swt[idx].base.not_off_mask) != 0);
-        if (blocked) {
-            s_con_swt_off_pending[idx] = true;
-            if (!s_con_swt_off_block_logged[idx]) {
-                ESP_LOGW(TAG,
-                         "ConSwt AS debounce -> OFF pending (blocked by not_off_mask): idx=%d cond_ok=%d mode_ok=%d bs_ok=%d as_ok=%d",
-                         (int)idx,
-                         cond_ok ? 1 : 0,
-                         mode_ok ? 1 : 0,
-                         bs_ok ? 1 : 0,
-                         as_ok ? 1 : 0);
-                s_con_swt_off_block_logged[idx] = true;
-            }
-            return;
-        }
         ESP_LOGW(TAG,
-                 "ConSwt AS debounce -> FORCE OFF: idx=%d cond_ok=%d mode_ok=%d bs_ok=%d as_ok=%d",
+                 "ConSwt AS debounce -> reconcile OFF path: idx=%d cond_ok=%d mode_ok=%d bs_ok=%d as_ok=%d",
                  (int)idx,
                  cond_ok ? 1 : 0,
                  mode_ok ? 1 : 0,
                  bs_ok ? 1 : 0,
                  as_ok ? 1 : 0);
-        con_swt_execute_off((int)idx);
+        app_driver_con_swt_group_reconcile_by_endpoint(ep);
     }
 }
 
@@ -1282,22 +1504,23 @@ static void con_swt_try_pending_offs_work(intptr_t)
         if (!s_con_swt_off_pending[c]) { 
             continue; 
         }
-        bool blocked = ((g_anna_cfg.on_pin & g_anna_cfg.con_swt[c].base.not_off_mask) != 0);
-        bool is_on = con_swt_is_on_by_pin(c);
-        int m = g_anna_cfg.con_swt[c].mode_idx;
-        bool mode_ok = (m < 0) || (g_anna_cfg.on_mode == m);
-        bool bs_ok = con_swt_bs_conditions_ok(c);
-        bool as_ok = con_swt_as_conditions_ok(c);
-        bool cond_ok = mode_ok && bs_ok && as_ok;
-        if (!blocked && !cond_ok && is_on) {
-            ESP_LOGI(TAG, "ConSwt pending OFF retry: idx=%d (not_off cleared, cond still false)", c);
-            con_swt_execute_off(c);
+        uint16_t ep = g_anna_cfg.con_swt[c].base.endpoint_id;
+        bool logical_on = con_swt_item_is_logically_on(c);
+        if (!logical_on) {
             s_con_swt_off_pending[c] = false;
             s_con_swt_off_block_logged[c] = false;
+            continue;
+        }
+        bool blocked = ((g_anna_cfg.on_pin & g_anna_cfg.con_swt[c].base.not_off_mask) != 0);
+        bool cond_ok = con_swt_all_conditions_ok(c, nullptr, nullptr, nullptr);
+        if (!blocked && !cond_ok) {
+            ESP_LOGI(TAG, "ConSwt pending OFF retry: idx=%d (not_off cleared, cond still false)", c);
+            app_driver_con_swt_group_reconcile_by_endpoint(ep);
         } else if (cond_ok) {
             ESP_LOGI(TAG, "ConSwt pending OFF canceled: idx=%d (conditions recovered)", c);
             s_con_swt_off_pending[c] = false;
             s_con_swt_off_block_logged[c] = false;
+            app_driver_con_swt_group_reconcile_by_endpoint(ep);
         }
     }
 }
@@ -1307,71 +1530,16 @@ static void con_swt_execute_off(int idx)
     if (idx < 0 || idx >= g_anna_cfg.con_swt_cnt) { 
         return; 
     }
-    if (idx < ANNA_MAX_CON_SWT_ACT) {
-        void * db_ctx = reinterpret_cast<void *>(static_cast<uintptr_t>(static_cast<uint16_t>(idx)));
-        chip::DeviceLayer::SystemLayer().CancelTimer(con_swt_as_debounce_timer_handler, db_ctx);
-        s_con_swt_as_db_timer_armed[idx] = false;
-    }
-    if (!con_swt_is_on_by_pin(idx)) {
-        if (idx < ANNA_MAX_CON_SWT_ACT) {
-            s_con_swt_off_pending[idx] = false;
-            s_con_swt_off_block_logged[idx] = false;
-        }
-        return;
-    }
-    // NotOffPin gate: if any pin in not_off_mask is currently ON, block OFF
-    if ((g_anna_cfg.on_pin & g_anna_cfg.con_swt[idx].base.not_off_mask) != 0) {
-        // Mark pending so we can retry when on_pin changes (update_on_pin_mask schedules con_swt_try_pending_offs_work)
-        s_con_swt_off_pending[idx] = true;
-        if (!s_con_swt_off_block_logged[idx]) {
-            ESP_LOGW(TAG, "ConSwt FORCE OFF blocked by not_off_mask: idx=%d on_pin=0x%08x mask=0x%08x",
-                     idx, (unsigned)g_anna_cfg.on_pin, (unsigned)g_anna_cfg.con_swt[idx].base.not_off_mask);
-            s_con_swt_off_block_logged[idx] = true;
-        }
-        return;
-    }
     int pin_no = (int)g_anna_cfg.con_swt[idx].base.pin_no;
-    gpio_num_t gpio = static_cast<gpio_num_t>(pin_no);
-    if (GPIO_IS_VALID_GPIO(gpio)) {
-        if (!s_con_swt_gpio_inited[idx]) {
-            gpio_reset_pin(gpio);
-            gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
-            s_con_swt_gpio_inited[idx] = true;
-            ESP_LOGW(TAG, "ConSwt GPIO late-init(off): idx=%d pin=%d", idx, pin_no);
-        }
-        gpio_set_level(gpio, 0);
+    bool gpio_off = con_swt_request_gpio_off_by_index(idx);
+    if (gpio_off) {
+        ESP_LOGI(TAG, "ConSwt runtime GPIO OFF: idx=%d ep=%u pin=%d on_pin=0x%08x",
+                 idx,
+                 (unsigned)g_anna_cfg.con_swt[idx].base.endpoint_id,
+                 pin_no,
+                 (unsigned)g_anna_cfg.on_pin);
     }
-    update_on_pin_mask((uint8_t)pin_no, false);
-    // Clear any pending/off-block log state after successful OFF
-    if (idx >= 0 && idx < ANNA_MAX_CON_SWT_ACT) {
-        s_con_swt_off_pending[idx] = false;
-        s_con_swt_off_block_logged[idx] = false;
-    }
-    ESP_LOGI(TAG, "ConSwt FORCE OFF: idx=%d ep=%u pin=%d on_pin=0x%08x", idx, (unsigned)g_anna_cfg.con_swt[idx].base.endpoint_id, pin_no, (unsigned)g_anna_cfg.on_pin);
-
-    // After turning this pin OFF, update endpoint Attribute only if all group pins are OFF
-    uint16_t ep = g_anna_cfg.con_swt[idx].base.endpoint_id;
-    bool any_on_in_group = false;
-    for (int c = 0; c < g_anna_cfg.con_swt_cnt; ++c) {
-        if (g_anna_cfg.con_swt[c].base.endpoint_id != ep) { 
-            continue; 
-        }
-        if (con_swt_is_on_by_pin(c)) { 
-            any_on_in_group = true; break; 
-        }
-    }
-    if (!any_on_in_group) {
-        s_internal_write = true;
-        (void) OnOff::Attributes::OnOff::Set(ep, false);
-        s_internal_write = false;
-    }
-
-    // Disarm AS periodic evaluation if no active con_swt remains
-    if (s_con_swt_as_timer_armed && !any_con_swt_on()) {
-        chip::DeviceLayer::SystemLayer().CancelTimer(con_swt_as_eval_timer_handler, nullptr);
-        s_con_swt_as_timer_armed = false;
-        ESP_LOGI(TAG, "ConSwt AS periodic eval disarmed (no active)");
-    }
+    con_swt_refresh_as_eval_timer();
 }
 
 extern "C" void app_driver_con_swt_force_off_by_index(int idx)
@@ -1611,20 +1779,19 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
 
         // any_satisfied in group: (mode ∧ bs ∧ as) OR
         bool any_satisfied = false;
-        // A-1 policy: endpoint group timeout seconds = max(max_sec) among satisfied items for this ON request.
+        // endpoint group timeout seconds = max(max_sec) among satisfied items for this ON request,
+        // but only for BS/AS-backed conditional-hold groups.
         int32_t group_max_sec = -1;
         con_btn_group_run_mode group_mode = con_btn_group_mode_for_endpoint(endpoint_id);
         for (int k = 0; k < idx_count; ++k) {
             int ci = idx_list[k];
-            int req_mode = g_anna_cfg.con_btn[ci].mode_idx;
-            bool mode_ok = (req_mode < 0) || (g_anna_cfg.on_mode == req_mode);
-            bool bs_ok = con_btn_bs_conditions_ok(ci);
-            bool as_ok = con_btn_as_conditions_ok(ci);
-            if (mode_ok && bs_ok && as_ok) {
+            if (con_btn_item_pre_on_conditions_ok(ci)) {
                 any_satisfied = true;
-                int32_t sec = (int32_t)g_anna_cfg.con_btn[ci].max_sec;
-                if (sec > group_max_sec) {
-                    group_max_sec = sec;
+                if (group_mode == con_btn_group_run_mode::conditional_hold) {
+                    int32_t sec = (int32_t)g_anna_cfg.con_btn[ci].max_sec;
+                    if (sec > group_max_sec) {
+                        group_max_sec = sec;
+                    }
                 }
             }
         }
@@ -1643,7 +1810,7 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
             chip::DeviceLayer::PlatformMgr().ScheduleWork(con_btn_execute_on_work, (intptr_t)packed_ce);
         }
 
-        // Arm (or cancel) endpoint-level group timeout (A-1: mode-dependent by satisfied-item selection)
+        // Arm (or cancel) endpoint-level group timeout only for conditional-hold groups.
         if (group_mode != con_btn_group_run_mode::pulse) {
             uint16_t sec_plus1 = 0; // 0 == cancel/disabled
             if (group_max_sec >= 0) {
@@ -1708,44 +1875,8 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
                 ESP_LOGI(TAG, "ConSwt PRE reject due to group not_on_mask overlap: ep=%u on_pin=0x%08x mask=0x%08x", (unsigned)endpoint_id, (unsigned)g_anna_cfg.on_pin, (unsigned)group_not_on_mask);
                 return ESP_ERR_NOT_ALLOWED;
             }
-            // Group any_satisfied gate: (mode && bs && as) OR
-            bool any_satisfied = false;
-            for (int k = 0; k < idx_count; ++k) {
-                int ci = idx_list[k];
-                int req_mode = g_anna_cfg.con_swt[ci].mode_idx;
-                bool mode_ok = (req_mode < 0) || (g_anna_cfg.on_mode == req_mode);
-                bool bs_ok = con_swt_bs_conditions_ok(ci);
-                bool as_ok = con_swt_as_conditions_ok(ci);
-                if (mode_ok && bs_ok && as_ok) {
-                    any_satisfied = true;
-                    break;
-                }
-            }
-            if (!any_satisfied) {
-                ESP_LOGI(TAG, "ConSwt PRE reject (no satisfied item in group): ep=%u", (unsigned)endpoint_id);
-                return ESP_ERR_NOT_ALLOWED;
-            }
-            // Immediate physical: turn ON all pins in this endpoint
-            for (int k = 0; k < idx_count; ++k) {
-                int ci = idx_list[k];
-                int pin_no = (int)g_anna_cfg.con_swt[ci].base.pin_no;
-                gpio_num_t gpio = static_cast<gpio_num_t>(pin_no);
-                if (GPIO_IS_VALID_GPIO(gpio)) {
-                    if (!s_con_swt_gpio_inited[ci]) {
-                        gpio_reset_pin(gpio);
-                        gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
-                        s_con_swt_gpio_inited[ci] = true;
-                        ESP_LOGW(TAG, "ConSwt GPIO late-init(PRE ON): idx=%d pin=%d", ci, pin_no);
-                    }
-                    gpio_set_level(gpio, 1);
-                    update_on_pin_mask((uint8_t)pin_no, true);
-                    ESP_LOGI(TAG, "ConSwt GPIO ON(PRE group): idx=%d ep=%u pin=%d on_pin=0x%08x", ci, (unsigned)endpoint_id, pin_no, (unsigned)g_anna_cfg.on_pin);
-                }
-            }
-            // Reflect endpoint Attribute ON only after physical pins are ON
-            s_internal_write = true;
-            (void) OnOff::Attributes::OnOff::Set(endpoint_id, true);
-            s_internal_write = false;
+            // mode/bs/as gating is no longer part of PRE ON. GPIO state is
+            // reconciled after commit using the current runtime conditions.
             // Arm cooldown once (use first index for counter)
             if (idx_count > 0) {
                 int ci = idx_list[0];
@@ -1754,7 +1885,7 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
                                       static_cast<uintptr_t>(static_cast<uint16_t>(endpoint_id));
                 chip::DeviceLayer::PlatformMgr().ScheduleWork(con_swt_cooldown_arm_work, (intptr_t)packed_cs);
             }
-            chip::DeviceLayer::PlatformMgr().ScheduleWork(con_swt_arm_as_eval_work, 0);
+            ESP_LOGI(TAG, "ConSwt PRE accept: ep=%u (GPIO decision deferred to post-commit reconcile)", (unsigned)endpoint_id);
             return ESP_OK;
         } else {
             // Group-level NotOffPin gate: if any item's not_off_mask overlaps current on_pin, reject OFF
@@ -1767,10 +1898,7 @@ esp_err_t app_driver_attribute_update(app_driver_handle_t driver_handle, uint16_
                 ESP_LOGI(TAG, "ConSwt PRE reject due to group not_off_mask overlap: ep=%u on_pin=0x%08x mask=0x%08x", (unsigned)endpoint_id, (unsigned)g_anna_cfg.on_pin, (unsigned)group_not_off_mask);
                 return ESP_ERR_NOT_ALLOWED;
             }
-            // OFF request: proceed per-item (honors item NotOffPin gate inside helper)
-            for (int k = 0; k < idx_count; ++k) {
-                con_swt_execute_off(idx_list[k]);
-            }
+            ESP_LOGI(TAG, "ConSwt PRE OFF accept: ep=%u (GPIO OFF deferred to post-commit reconcile)", (unsigned)endpoint_id);
             return ESP_OK;
         }
     }
@@ -1927,11 +2055,7 @@ static void mode_apply_work_handler(intptr_t)
             bool any_satisfied = false;
             for (int i = 0; i < g_anna_cfg.con_btn_cnt; ++i) {
                 if (g_anna_cfg.con_btn[i].base.endpoint_id != ep) { continue; }
-                int m = g_anna_cfg.con_btn[i].mode_idx;
-                bool mode_ok = (m < 0) || (g_anna_cfg.on_mode == m);
-                bool bs_ok = con_btn_bs_conditions_ok(i);
-                bool as_ok = con_btn_as_conditions_ok(i);
-                if (mode_ok && bs_ok && as_ok) { any_satisfied = true; }
+                if (con_btn_item_hold_conditions_ok(i)) { any_satisfied = true; }
             }
             if (any_satisfied) {
                 // Maintain-only: ensure group pins ON if group already ON; do not auto-ON here
@@ -1947,10 +2071,8 @@ static void mode_apply_work_handler(intptr_t)
             }
         }
     }
-    // Enforce con_swt mode condition AFTER winner commit
+    // Enforce con_swt runtime condition AFTER winner commit
     {
-        // Group-OR per endpoint: preserve ON if any item satisfied; OFF only if none
-        // Build list of distinct endpoints in ConSwt
         uint16_t ep_list[ANNA_MAX_CON_SWT_ACT];
         int ep_count = 0;
         for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
@@ -1967,82 +2089,7 @@ static void mode_apply_work_handler(intptr_t)
         }
         for (int e = 0; e < ep_count; ++e) {
             uint16_t ep = ep_list[e];
-            // Evaluate items in this group
-            bool any_satisfied = false;
-            pin_mask_t group_not_on_mask = 0;
-            pin_mask_t group_not_off_mask = 0;
-            for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
-                if (g_anna_cfg.con_swt[i].base.endpoint_id != ep) { 
-                    continue; 
-                }
-                group_not_on_mask  |= g_anna_cfg.con_swt[i].base.not_on_mask;
-                group_not_off_mask |= g_anna_cfg.con_swt[i].base.not_off_mask;
-                int m = g_anna_cfg.con_swt[i].mode_idx;
-                bool mode_ok = (m < 0) || (g_anna_cfg.on_mode == m);
-                bool bs_ok = con_swt_bs_conditions_ok(i);
-                bool as_ok = con_swt_as_conditions_ok(i);
-                if (mode_ok && bs_ok && as_ok) {
-                    any_satisfied = true;
-                }
-            }
-            // NEW: only maintain/ensure ON if the group is already physically ON (prevent auto-ON on mode change)
-            bool any_on_in_group = false;
-            for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
-                if (g_anna_cfg.con_swt[i].base.endpoint_id != ep) {
-                    continue;
-                }
-                if (con_swt_is_on_by_pin(i)) {
-                    any_on_in_group = true;
-                    break;
-                }
-            }
-            if (any_satisfied) {
-                // OLD behavior (auto-ON on any_satisfied) removed to honor PRE-only auto-ON policy
-                if (any_on_in_group) {
-                    // Preserve ON: ensure all group pins are ON unless NotOnPin group gate blocks
-                    if ((g_anna_cfg.on_pin & group_not_on_mask) == 0) {
-                        for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
-                            if (g_anna_cfg.con_swt[i].base.endpoint_id != ep) { 
-                                continue; 
-                            }
-                            int pin_no = (int)g_anna_cfg.con_swt[i].base.pin_no;
-                            gpio_num_t gpio = static_cast<gpio_num_t>(pin_no);
-                            if (GPIO_IS_VALID_GPIO(gpio)) {
-                                if (!s_con_swt_gpio_inited[i]) {
-                                    gpio_reset_pin(gpio);
-                                    gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
-                                    s_con_swt_gpio_inited[i] = true;
-                                    ESP_LOGW(TAG, "ConSwt GPIO late-init(mode keep): idx=%d pin=%d", i, pin_no);
-                                }
-                                gpio_set_level(gpio, 1);
-                                update_on_pin_mask((uint8_t)pin_no, true);
-                            }
-                        }
-                        // Reflect Attribute ON to match physical
-                        s_internal_write = true;
-                        (void) OnOff::Attributes::OnOff::Set(ep, true);
-                        s_internal_write = false;
-                        chip::DeviceLayer::PlatformMgr().ScheduleWork(con_swt_arm_as_eval_work, 0);
-                    } else {
-                        ESP_LOGW(TAG, "ConSwt mode-keep blocked by group not_on_mask: ep=%u on_pin=0x%08x", (unsigned)ep, (unsigned)g_anna_cfg.on_pin);
-                    }
-                } else {
-                    // Group satisfied but physically OFF -> do not auto-ON here
-                    ESP_LOGI(TAG, "ConSwt mode-keep: satisfied but group OFF -> no auto-ON: ep=%u", (unsigned)ep);
-                }
-            } else {
-                // No satisfied items: force OFF (respect item/group NotOffPin gates)
-                if ((g_anna_cfg.on_pin & group_not_off_mask) != 0) {
-                    ESP_LOGW(TAG, "ConSwt group OFF blocked by group not_off_mask: ep=%u on_pin=0x%08x", (unsigned)ep, (unsigned)g_anna_cfg.on_pin);
-                }
-                for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
-                    if (g_anna_cfg.con_swt[i].base.endpoint_id != ep) { 
-                        continue; 
-                    }
-                    con_swt_execute_off(i);
-                }
-                // Attribute OFF will be set by con_swt_execute_off() after all pins become LOW
-            }
+            app_driver_con_swt_group_reconcile_by_endpoint(ep);
         }
     }
 
@@ -2071,6 +2118,48 @@ void app_driver_queue_mode_apply(void)
     }
     s_apply_queued = true;
     chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t){ mode_apply_work_handler(0); }, 0);
+}
+
+/* Boot-only reconcile:
+ * - preserve persisted single-on state
+ * - normalize all-off/multi-on to index 0 only
+ * - do not re-enter runtime apply or downstream action reconcile paths
+ */
+extern "C" void app_driver_boot_reconcile_mode_only(void)
+{
+    if (g_anna_cfg.modes.mode_count <= 0) {
+        ESP_LOGI(TAG, "Boot mode reconcile skipped: no mode endpoints");
+        return;
+    }
+
+    int onCount = 0;
+    int lastOnIdx = -1;
+    for (int j = 0; j < g_anna_cfg.modes.mode_count; ++j) {
+        bool s = false;
+        (void) OnOff::Attributes::OnOff::Get(g_anna_cfg.modes.endpoint_id[j], &s);
+        if (s) {
+            onCount++;
+            lastOnIdx = j;
+        }
+    }
+
+    if (onCount == 1 && lastOnIdx >= 0) {
+        g_anna_cfg.on_mode = lastOnIdx;
+        if (g_led_handle) {
+            (void) led_controller_set_color_idx(g_led_handle, (uint8_t)lastOnIdx);
+            ESP_LOGI(TAG, "LED synced to persisted single-on mode: %d", lastOnIdx);
+        } else {
+            ESP_LOGI(TAG, "Boot mode preserved without LED: %d", lastOnIdx);
+        }
+        return;
+    }
+
+    if (onCount == 0) {
+        ESP_LOGI(TAG, "Boot mode reconcile: all off -> index 0 only");
+    } else {
+        ESP_LOGI(TAG, "Boot mode reconcile: multi-on=%d -> index 0 only", onCount);
+    }
+    apply_mode_winner(0);
 }
 
 extern "C" void app_driver_boot_safe_off_sync_non_mode(void)
@@ -2156,7 +2245,17 @@ void app_driver_schedule_mode_debounce(void)
 esp_err_t app_driver_attribute_post_update(uint16_t endpoint_id, uint32_t cluster_id,
                                            uint32_t attribute_id, esp_matter_attr_val_t *val)
 {
-    // No-op: debounced handler will apply invariants
+    (void) val;
+    if (cluster_id != OnOff::Id || attribute_id != OnOff::Attributes::OnOff::Id) {
+        return ESP_OK;
+    }
+    for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
+        if (g_anna_cfg.con_swt[i].base.endpoint_id != endpoint_id) {
+            continue;
+        }
+        app_driver_con_swt_group_reconcile_by_endpoint(endpoint_id);
+        break;
+    }
     return ESP_OK;
 }
 
@@ -2173,7 +2272,10 @@ esp_err_t app_driver_led_init(void)
  */
 extern "C" bool app_driver_con_swt_maintain_group_on_if_satisfied(uint16_t endpoint_id)
 {
-    // Check if any pin in this endpoint group is already physically ON
+    bool logical_on = con_swt_endpoint_is_logically_on(endpoint_id);
+    if (!logical_on) {
+        return false;
+    }
     bool any_on_in_group = false;
     for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
         if (g_anna_cfg.con_swt[i].base.endpoint_id != endpoint_id) { continue; }
@@ -2202,26 +2304,7 @@ extern "C" bool app_driver_con_swt_maintain_group_on_if_satisfied(uint16_t endpo
         ESP_LOGW(TAG, "ConSwt maintain blocked by group not_on_mask: ep=%u on_pin=0x%08x", (unsigned)endpoint_id, (unsigned)g_anna_cfg.on_pin);
         return false;
     }
-    // Re-assert all group pins ON and keep Attribute ON
-    for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
-        if (g_anna_cfg.con_swt[i].base.endpoint_id != endpoint_id) { continue; }
-        int pin_no = (int)g_anna_cfg.con_swt[i].base.pin_no;
-        gpio_num_t gpio = static_cast<gpio_num_t>(pin_no);
-        if (GPIO_IS_VALID_GPIO(gpio)) {
-            if (!s_con_swt_gpio_inited[i]) {
-                gpio_reset_pin(gpio);
-                gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
-                s_con_swt_gpio_inited[i] = true;
-                ESP_LOGW(TAG, "ConSwt GPIO late-init(maintain): idx=%d pin=%d", i, pin_no);
-            }
-            gpio_set_level(gpio, 1);
-            update_on_pin_mask((uint8_t)pin_no, true);
-        }
-    }
-    s_internal_write = true;
-    (void) OnOff::Attributes::OnOff::Set(endpoint_id, true);
-    s_internal_write = false;
-    chip::DeviceLayer::PlatformMgr().ScheduleWork(con_swt_arm_as_eval_work, 0);
+    app_driver_con_swt_group_reconcile_by_endpoint(endpoint_id);
     ESP_LOGI(TAG, "ConSwt maintain group ON: ep=%u", (unsigned)endpoint_id);
     return true;
 }

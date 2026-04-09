@@ -178,13 +178,9 @@ static void con_btn_bs_work_handler(intptr_t arg)
         if (!this_btn_refs_pin) { 
             continue; 
         }
-        /* Mode condition 
-           post_update에서 처리하고 있지만, 센서 변화가 모드 변경 직후 들어오거나, 워크 큐 처리 순서/레이스 시에도 안전 */
-        int m = g_anna_cfg.con_btn[c].mode_idx;
-        bool mode_ok = (m < 0) || (g_anna_cfg.on_mode == m);
-        bool cond_ok = (mode_ok && bs_ok_all);
-        ESP_LOGI(TAG, "ConBtn BS EVAL: idx=%d pin=%d cond_ok=%d mode_ok=%d bs_ok=%d is_on=%d", c, pin, cond_ok?1:0, mode_ok?1:0, bs_ok_all?1:0, g_anna_cfg.con_btn[c].is_on?1:0);
-        if (g_anna_cfg.con_btn[c].is_on && !cond_ok) {
+        bool hold_ok = bs_ok_all;
+        ESP_LOGI(TAG, "ConBtn BS EVAL: idx=%d pin=%d hold_ok=%d bs_ok=%d is_on=%d", c, pin, hold_ok ? 1 : 0, bs_ok_all ? 1 : 0, g_anna_cfg.con_btn[c].is_on ? 1 : 0);
+        if (g_anna_cfg.con_btn[c].is_on && !hold_ok) {
             uint16_t ep = g_anna_cfg.con_btn[c].base.endpoint_id;
             if (app_driver_con_btn_maintain_group_on_if_satisfied(ep)) {
                 continue;
@@ -195,6 +191,8 @@ static void con_btn_bs_work_handler(intptr_t arg)
     }
 
     /* Evaluate con_swt referencing this pin */
+    uint16_t con_swt_ep_list[ANNA_MAX_CON_SWT_ACT] = {};
+    int con_swt_ep_count = 0;
     for (int c = 0; c < g_anna_cfg.con_swt_cnt; ++c) {
         bool this_act_refs_pin = false;
         bool bs_ok_all = true;
@@ -215,25 +213,31 @@ static void con_btn_bs_work_handler(intptr_t arg)
         }
         int m = g_anna_cfg.con_swt[c].mode_idx;
         bool mode_ok = (m < 0) || (g_anna_cfg.on_mode == m);
-        bool is_on = false;
-        {
-            int pin_no = (int)g_anna_cfg.con_swt[c].base.pin_no;
-            if (pin_no >= 0 && pin_no < 32) {
-                is_on = (g_anna_cfg.on_pin & (1u << pin_no)) != 0;
-            }
-        }
         bool cond_ok = (mode_ok && bs_ok_all);
-        ESP_LOGI(TAG, "ConSwt BS EVAL: idx=%d pin=%d cond_ok=%d mode_ok=%d bs_ok=%d is_on=%d", c, pin, cond_ok?1:0, mode_ok?1:0, bs_ok_all?1:0, is_on?1:0);
-        // OFF-only: if currently ON and condition fails, force OFF for this item
-        if (is_on && !cond_ok) {
-            // Maintain-only: if any sibling remains satisfied and group already ON, keep group ON
-            uint16_t ep = g_anna_cfg.con_swt[c].base.endpoint_id;
-            if (app_driver_con_swt_maintain_group_on_if_satisfied(ep)) {
-                continue;
+        uint16_t ep = g_anna_cfg.con_swt[c].base.endpoint_id;
+        ESP_LOGI(TAG, "ConSwt BS EVAL: idx=%d pin=%d cond_ok=%d mode_ok=%d bs_ok=%d ep=%u",
+                 c,
+                 pin,
+                 cond_ok ? 1 : 0,
+                 mode_ok ? 1 : 0,
+                 bs_ok_all ? 1 : 0,
+                 (unsigned)ep);
+        bool seen = false;
+        for (int i = 0; i < con_swt_ep_count; ++i) {
+            if (con_swt_ep_list[i] == ep) {
+                seen = true;
+                break;
             }
-            ESP_LOGW(TAG, "ConSwt BS -> FORCE OFF: idx=%d pin=%d", c, pin);
-            app_driver_con_swt_force_off_by_index(c);
         }
+        if (!seen && ep != ENDPOINT_ID_INVALID && con_swt_ep_count < ANNA_MAX_CON_SWT_ACT) {
+            con_swt_ep_list[con_swt_ep_count++] = ep;
+        }
+    }
+    for (int i = 0; i < con_swt_ep_count; ++i) {
+        if (con_swt_ep_list[i] == ENDPOINT_ID_INVALID) {
+            continue;
+        }
+        app_driver_con_swt_group_reconcile_by_endpoint(con_swt_ep_list[i]);
     }
 }
 
@@ -532,36 +536,14 @@ chip::ChipError set_all_user_label(void)
     return err;
 }
 
-/* 부팅 직후: NVS에 저장된 모드 상태에 맞춰 LED 동기화
- * - 정확히 하나의 모드만 ON이면 해당 인덱스 색으로 LED 설정
- * - 모두 OFF면 LED 끔
- * - 둘 이상 ON이면 적용 루프를 큐잉하여 불변식 강제(LED는 적용 경로에서 색 반영)
+/* 부팅 직후: persisted mode를 boot helper로 점검/정규화
+ * - 정확히 하나만 ON이면 해당 index를 유지하고 LED가 있으면 동기화
+ * - 모두 OFF 또는 둘 이상 ON이면 helper가 index 0 only로 정규화
+ * - LED가 없어도 mode invariant 정규화는 계속 수행
  */
 static void sync_led_with_persisted_mode()
 {
-    if (!g_led_handle) {
-        return;
-    }
-
-    int onCount = 0;
-    int lastOnIdx = -1;
-    for (int i = 0; i < g_anna_cfg.modes.mode_count; i++) {
-        bool s = false;
-        (void) chip::app::Clusters::OnOff::Attributes::OnOff::Get(g_anna_cfg.modes.endpoint_id[i], &s);
-        if (s) { 
-            onCount++;
-            lastOnIdx = i; 
-        }
-    }
-
-    if (onCount == 1) {
-        g_anna_cfg.on_mode = lastOnIdx;
-        (void) led_controller_set_color_idx(g_led_handle, (uint8_t)lastOnIdx);
-        ESP_LOGI(TAG, "LED synced to persisted single-on mode: %d", lastOnIdx);
-    } else {
-        (void) led_controller_turn_off(g_led_handle);
-        ESP_LOGI(TAG, "No mode ON at boot; LED turned off");
-    }
+    app_driver_boot_reconcile_mode_only();
 }
 
 void settings_init(node_t *node) {

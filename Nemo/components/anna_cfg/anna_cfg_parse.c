@@ -203,19 +203,19 @@ static void fixed_label_clear(anna_fixed_label_kv_t *out, uint8_t *out_cnt)
     }
 }
 
-static void parse_fixed_label_array_cjson(const cJSON *parent_obj, anna_fixed_label_kv_t *out, uint8_t *out_cnt)
+static esp_err_t parse_fixed_label_array_cjson(const cJSON *parent_obj, anna_fixed_label_kv_t *out, uint8_t *out_cnt)
 {
     fixed_label_clear(out, out_cnt);
-    if (!cJSON_IsObject(parent_obj)) return;
+    if (!cJSON_IsObject(parent_obj)) return ESP_OK;
 
     const cJSON *arr = cJSON_GetObjectItemCaseSensitive((cJSON *)parent_obj, "FixedLabel");
     if (!arr || cJSON_IsNull(arr)) {
         /* legacy: key missing OR explicitly null -> treat as absent/empty */
-        return;
+        return ESP_OK;
     }
     if (!cJSON_IsArray(arr)) {
         ESP_LOGW(TAG, "FixedLabel ignored: not array");
-        return;
+        return ESP_OK;
     }
 
     const cJSON *it = NULL;
@@ -226,7 +226,7 @@ static void parse_fixed_label_array_cjson(const cJSON *parent_obj, anna_fixed_la
         }
         if (!out_cnt || *out_cnt >= ANNA_MAX_FIXED_LABEL) {
             ESP_LOGW(TAG, "FixedLabel overflow: max=%d (extra items ignored)", (int)ANNA_MAX_FIXED_LABEL);
-            return;
+            return ESP_OK;
         }
 
         const cJSON *j_l = cJSON_GetObjectItemCaseSensitive((cJSON *)it, "Label");
@@ -240,8 +240,8 @@ static void parse_fixed_label_array_cjson(const cJSON *parent_obj, anna_fixed_la
         char nv[ANNA_MAX_FIXED_LABEL_STR_LEN] = {0};
         if (!fixed_label_normalize(j_l->valuestring, nl, sizeof(nl)) ||
             !fixed_label_normalize(j_v->valuestring, nv, sizeof(nv))) {
-            ESP_LOGW(TAG, "FixedLabel item ignored: invalid string rule");
-            continue;
+            ESP_LOGW(TAG, "FixedLabel invalid string rule: rejecting payload");
+            return ESP_ERR_INVALID_ARG;
         }
 
         uint8_t idx = *out_cnt;
@@ -249,6 +249,7 @@ static void parse_fixed_label_array_cjson(const cJSON *parent_obj, anna_fixed_la
         strlcpy(out[idx].value, nv, sizeof(out[idx].value));
         (*out_cnt)++;
     }
+    return ESP_OK;
 }
 
 static void cfg_reset_defaults(void)
@@ -356,7 +357,7 @@ static esp_err_t parse_button_array_cjson(const cJSON *arr, bool is_legacy_oneac
         uint32_t pin = 0;
         if (json_get_u32_flexible(it, "PinNo", &pin)) dst->base.pin_no = (uint8_t)pin;
 
-        parse_fixed_label_array_cjson(it, dst->fixed_label, &dst->fixed_label_cnt);
+        if (parse_fixed_label_array_cjson(it, dst->fixed_label, &dst->fixed_label_cnt) != ESP_OK) return ESP_ERR_INVALID_ARG;
         dst->base.not_on_mask  = build_pin_mask_cjson(cJSON_GetObjectItemCaseSensitive((cJSON *)it, "NotOnPin"));
         dst->base.not_off_mask = build_pin_mask_cjson(cJSON_GetObjectItemCaseSensitive((cJSON *)it, "NotOffPin"));
         (void)is_legacy_oneact;
@@ -384,7 +385,7 @@ static esp_err_t parse_switch_array_cjson(const cJSON *arr, bool is_legacy_norac
         uint32_t pin = 0;
         if (json_get_u32_flexible(it, "PinNo", &pin)) dst->base.pin_no = (uint8_t)pin;
 
-        parse_fixed_label_array_cjson(it, dst->fixed_label, &dst->fixed_label_cnt);
+        if (parse_fixed_label_array_cjson(it, dst->fixed_label, &dst->fixed_label_cnt) != ESP_OK) return ESP_ERR_INVALID_ARG;
         dst->base.not_on_mask  = build_pin_mask_cjson(cJSON_GetObjectItemCaseSensitive((cJSON *)it, "NotOnPin"));
         dst->base.not_off_mask = build_pin_mask_cjson(cJSON_GetObjectItemCaseSensitive((cJSON *)it, "NotOffPin"));
         (void)is_legacy_noract;
@@ -468,7 +469,7 @@ static esp_err_t parse_con_btn_array_cjson(const cJSON *arr)
                                 cJSON_GetObjectItemCaseSensitive((cJSON *)it, "Label"),
                                 ANNA_MAX_USER_LABEL_STR_LEN - 1);
 
-        parse_fixed_label_array_cjson(it, dst->fixed_label, &dst->fixed_label_cnt);
+        if (parse_fixed_label_array_cjson(it, dst->fixed_label, &dst->fixed_label_cnt) != ESP_OK) return ESP_ERR_INVALID_ARG;
         uint32_t u32 = 0;
         if (json_get_u32_flexible(it, "PinNo", &u32)) dst->base.pin_no = (uint8_t)u32;
 
@@ -511,7 +512,7 @@ static esp_err_t parse_con_swt_array_cjson(const cJSON *arr)
                                 cJSON_GetObjectItemCaseSensitive((cJSON *)it, "Label"),
                                 ANNA_MAX_USER_LABEL_STR_LEN - 1);
 
-        parse_fixed_label_array_cjson(it, dst->fixed_label, &dst->fixed_label_cnt);
+        if (parse_fixed_label_array_cjson(it, dst->fixed_label, &dst->fixed_label_cnt) != ESP_OK) return ESP_ERR_INVALID_ARG;
         uint32_t u32 = 0;
         if (json_get_u32_flexible(it, "PinNo", &u32)) dst->base.pin_no = (uint8_t)u32;
 

@@ -447,6 +447,7 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
                 app_driver_queue_mode_apply();
             }
         }
+        err = app_driver_attribute_post_update(endpoint_id, cluster_id, attribute_id, val);
     }
 
     if (cluster_id == ModeSelect::Id && attribute_id == ModeSelect::Attributes::CurrentMode::Id) {

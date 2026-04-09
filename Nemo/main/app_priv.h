@@ -66,9 +66,11 @@ esp_err_t app_driver_attribute_post_update(uint16_t endpoint_id, uint32_t cluste
 /* Immediate apply (PlatformMgr work queue) */
 void app_driver_queue_mode_apply(void);
 #ifdef __cplusplus
+extern "C" void app_driver_boot_reconcile_mode_only(void);
 extern "C" void app_driver_boot_safe_off_sync_non_mode(void);
 extern "C" {
 #else
+void app_driver_boot_reconcile_mode_only(void);
 void app_driver_boot_safe_off_sync_non_mode(void);
 #endif
 
