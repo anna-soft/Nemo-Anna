@@ -35,11 +35,13 @@
 
 #include "app_priv.h"
 #include "anna_cfg.h"
+#include "anna_factory_reset.h"
 #include "anna_state_storage.h"
 #include "host_serial_rx.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <freertos/timers.h>
 #include <esp_system.h>
 
 #include <crypto/CHIPCryptoPAL.h>
@@ -147,6 +149,10 @@ static AnnaDeviceInfoProvider s_anna_device_info_provider;
 #endif
 
 constexpr auto k_timeout_seconds = 300;
+static constexpr uint8_t kPowerCycleResetThreshold = 5;
+static constexpr uint32_t kPowerCycleClearWindowMs = 10000;
+static TimerHandle_t s_power_cycle_clear_timer = nullptr;
+static bool s_power_cycle_clear_timer_armed = false;
 
 #ifdef CONFIG_ENABLE_SET_CERT_DECLARATION_API
 extern const uint8_t cd_start[] asm("_binary_certification_declaration_der_start");
@@ -317,6 +323,156 @@ extern "C" void anna_emit_board_info_json_for_rx_task(void)
 {
     emit_board_info_json();
 }
+
+static void open_basic_commissioning_window_if_needed(void)
+{
+    chip::CommissioningWindowManager & commissionMgr = chip::Server::GetInstance().GetCommissioningWindowManager();
+    constexpr auto kTimeoutSeconds = chip::System::Clock::Seconds16(k_timeout_seconds);
+    if (commissionMgr.IsCommissioningWindowOpen()) {
+        return;
+    }
+
+    CHIP_ERROR err = commissionMgr.OpenBasicCommissioningWindow(
+        kTimeoutSeconds, chip::CommissioningWindowAdvertisement::kDnssdOnly);
+    if (err != CHIP_NO_ERROR) {
+        ESP_LOGE(TAG, "Failed to open commissioning window, err:%" CHIP_ERROR_FORMAT, err.Format());
+    }
+}
+
+static void last_fabric_factory_reset_work(intptr_t)
+{
+    esp_err_t err = anna_factory_reset_request_pending();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Deferred last-fabric factory reset failed: %s", esp_err_to_name(err));
+        open_basic_commissioning_window_if_needed();
+    }
+}
+
+static void power_cycle_clear_timer_callback(TimerHandle_t)
+{
+    s_power_cycle_clear_timer_armed = false;
+
+    if (!anna_factory_reset_power_cycle_feature_enabled()) {
+        return;
+    }
+    if (anna_factory_reset_is_pending() || anna_factory_reset_is_requested()) {
+        return;
+    }
+
+    esp_err_t err = anna_factory_reset_store_power_cycle_count(0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear power-cycle count after 10s uptime: %s", esp_err_to_name(err));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Power-cycle count cleared after %u ms uptime",
+             static_cast<unsigned>(kPowerCycleClearWindowMs));
+}
+
+static void cancel_power_cycle_clear_timer_if_armed(void)
+{
+    if (!s_power_cycle_clear_timer || !s_power_cycle_clear_timer_armed) {
+        return;
+    }
+    if (xTimerStop(s_power_cycle_clear_timer, 0) == pdPASS) {
+        s_power_cycle_clear_timer_armed = false;
+    }
+}
+
+static void arm_power_cycle_clear_timer_if_needed(void)
+{
+    if (!anna_factory_reset_power_cycle_feature_enabled() || anna_factory_reset_is_pending()) {
+        return;
+    }
+
+    if (!s_power_cycle_clear_timer) {
+        s_power_cycle_clear_timer = xTimerCreate("anna_pcycle_clear",
+                                                 pdMS_TO_TICKS(kPowerCycleClearWindowMs), pdFALSE, nullptr,
+                                                 power_cycle_clear_timer_callback);
+        if (!s_power_cycle_clear_timer) {
+            ESP_LOGW(TAG, "Failed to create power-cycle clear timer");
+            return;
+        }
+    }
+
+    if (xTimerStop(s_power_cycle_clear_timer, 0) != pdPASS) {
+        ESP_LOGW(TAG, "Failed to stop existing power-cycle clear timer");
+    }
+    if (xTimerChangePeriod(s_power_cycle_clear_timer, pdMS_TO_TICKS(kPowerCycleClearWindowMs), 0) != pdPASS) {
+        ESP_LOGW(TAG, "Failed to change power-cycle clear timer period");
+        return;
+    }
+    if (xTimerStart(s_power_cycle_clear_timer, 0) != pdPASS) {
+        ESP_LOGW(TAG, "Failed to start power-cycle clear timer");
+        return;
+    }
+    s_power_cycle_clear_timer_armed = true;
+}
+
+static void maybe_arm_power_cycle_factory_reset(void)
+{
+    anna_factory_reset_persistent_state_t reset_state = {};
+    esp_err_t err = anna_factory_reset_prepare_power_cycle_state(true, &reset_state);
+    if (err != ESP_OK || !reset_state.feature_enabled) {
+        return;
+    }
+
+    if (reset_state.persistent_pending) {
+        ESP_LOGW(TAG, "Persistent factory reset already armed: source=%s",
+                 anna_factory_reset_source_name(reset_state.pending_source));
+        return;
+    }
+
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    if (reset_reason != ESP_RST_POWERON) {
+        ESP_LOGI(TAG, "Skip power-cycle increment for reset_reason=%d", static_cast<int>(reset_reason));
+        arm_power_cycle_clear_timer_if_needed();
+        return;
+    }
+
+    uint8_t next_count = reset_state.power_cycle_count;
+    if (next_count < UINT8_MAX) {
+        ++next_count;
+    }
+
+    if (next_count < kPowerCycleResetThreshold) {
+        err = anna_factory_reset_store_power_cycle_count(next_count);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to store power-cycle count=%u: %s",
+                     static_cast<unsigned>(next_count), esp_err_to_name(err));
+            return;
+        }
+        ESP_LOGI(TAG, "Power-cycle count updated: %u/%u",
+                 static_cast<unsigned>(next_count), static_cast<unsigned>(kPowerCycleResetThreshold));
+        arm_power_cycle_clear_timer_if_needed();
+        return;
+    }
+
+    err = anna_factory_reset_store_power_cycle_count(0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear power-cycle count before arm: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = anna_factory_reset_store_pending_source(ANNA_FACTORY_RESET_SOURCE_POWER_CYCLE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to persist power-cycle pending state: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = anna_factory_reset_arm(ANNA_FACTORY_RESET_SOURCE_POWER_CYCLE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to arm power-cycle factory reset: %s", esp_err_to_name(err));
+        esp_err_t clear_err = anna_factory_reset_clear_persistent_state();
+        if (clear_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to clear stale power-cycle pending state: %s", esp_err_to_name(clear_err));
+        }
+        return;
+    }
+
+    ESP_LOGW(TAG, "Power-cycle threshold reached, deferred factory reset armed");
+}
+
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
     switch (event->Type) {
@@ -359,21 +515,23 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     case chip::DeviceLayer::DeviceEventType::kFabricRemoved:
         {
             ESP_LOGI(TAG, "Fabric removed successfully");
-            if (chip::Server::GetInstance().GetFabricTable().FabricCount() == 0)
-            {
-                chip::CommissioningWindowManager & commissionMgr = chip::Server::GetInstance().GetCommissioningWindowManager();
-                constexpr auto kTimeoutSeconds = chip::System::Clock::Seconds16(k_timeout_seconds);
-                if (!commissionMgr.IsCommissioningWindowOpen())
-                {
-                    /* After removing last fabric, this example does not remove the Wi-Fi credentials
-                     * and still has IP connectivity so, only advertising on DNS-SD.
-                     */
-                    CHIP_ERROR err = commissionMgr.OpenBasicCommissioningWindow(kTimeoutSeconds,
-                                                    chip::CommissioningWindowAdvertisement::kDnssdOnly);
-                    if (err != CHIP_NO_ERROR)
-                    {
-                        ESP_LOGE(TAG, "Failed to open commissioning window, err:%" CHIP_ERROR_FORMAT, err.Format());
-                    }
+            if (chip::Server::GetInstance().GetFabricTable().FabricCount() == 0) {
+                if (anna_factory_reset_is_requested()) {
+                    ESP_LOGW(TAG, "Factory reset already requested, ignore last-fabric trigger");
+                    break;
+                }
+
+                esp_err_t arm_err = anna_factory_reset_arm(ANNA_FACTORY_RESET_SOURCE_LAST_FABRIC);
+                if (arm_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to arm last-fabric factory reset: %s", esp_err_to_name(arm_err));
+                    break;
+                }
+
+                CHIP_ERROR err = chip::DeviceLayer::PlatformMgr().ScheduleWork(last_fabric_factory_reset_work, 0);
+                if (err != CHIP_NO_ERROR) {
+                    ESP_LOGE(TAG, "Failed to schedule last-fabric factory reset, err:%" CHIP_ERROR_FORMAT, err.Format());
+                    anna_factory_reset_clear_pending();
+                    open_basic_commissioning_window_if_needed();
                 }
             }
         break;
@@ -500,6 +658,8 @@ extern "C" void app_main()
         return;
     }
 
+    maybe_arm_power_cycle_factory_reset();
+
     /* json 파일 처리하기 */
     err = (esp_err_t)anna_cfg_load_from_nvs();
     if (err != ESP_OK) {
@@ -564,6 +724,16 @@ extern "C" void app_main()
 #ifdef CONFIG_ENABLE_MEMORY_PROFILING
     memory_profiler_dump_heap_stat("esp matter start");
 #endif
+
+    err = anna_factory_reset_request_pending();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Deferred factory reset request after esp_matter::start() failed: %s", esp_err_to_name(err));
+    }
+    if (anna_factory_reset_is_requested()) {
+        cancel_power_cycle_clear_timer_if_armed();
+        ESP_LOGW(TAG, "Factory reset requested after esp_matter::start(); skip post-start init");
+        return;
+    }
 
     settings_post_esp_start_init();
 
