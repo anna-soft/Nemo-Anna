@@ -7,5 +7,33 @@ menu "Example Configuration"
             Enable this option to include memory profiling features in the example.
             This will allow you to monitor memory usage during runtime.
 
-endmenu
+    config ANNA_CLOUD_SYNC_BASE_URL
+        string "Anna cloud sync base URL"
+        default "https://anna.invalid"
+        help
+            Fleet-global HTTPS base URL used by firmware cloud sync for
+            /api/device/config/pull and /api/device/config/ack.
 
+    config ANNA_CLOUD_SYNC_HTTP_TIMEOUT_MS
+        int "Anna cloud sync HTTP timeout (ms)"
+        range 1000 60000
+        default 8000
+        help
+            Timeout for pull/ack HTTP requests.
+
+    config ANNA_CLOUD_SYNC_TASK_STACK_BYTES
+        int "Anna cloud sync task stack size (bytes)"
+        range 4096 32768
+        default 12288
+        help
+            Stack size for the dedicated anna_cloud_sync worker task.
+
+    config ANNA_CLOUD_SYNC_TEST_HARNESS
+        bool "Enable Anna cloud sync test-only harness"
+        default n
+        help
+            Test-only guard for branch-forcing harness used to verify
+            pre-fabric cloud sync paths without changing production default
+            behavior. Keep disabled for representative builds.
+
+endmenu

@@ -19,6 +19,7 @@ extern "C" {
 #define ANNA_MAX_CON_ACT             10   /* ConButton */
 #define ANNA_MAX_CON_SWT_ACT         10   /* ConSwitchAct */
 #define ANNA_MAX_MODE_COUNT           4   /* ModeNo 2~4 */
+#define ANNA_MAX_DYNAMIC_ENDPOINT_COUNT (ANNA_MAX_MODE_COUNT + ANNA_MAX_BUTTON + ANNA_MAX_SWITCH + ANNA_MAX_CON_ACT + ANNA_MAX_CON_SWT_ACT)
 #define ANNA_MAX_PROTECT_PINS        10   /* observed arrays up to 10 */
 #define ANNA_PIN_UNDEF               -1
 
@@ -197,7 +198,10 @@ extern anna_cfg_t g_anna_cfg;
 /* API */
 int  anna_cfg_load_from_nvs(void);             /* read + parse */
 int  anna_cfg_save_to_nvs(const char *json, size_t len);
+int  anna_cfg_save_snapshot_to_nvs(const char *json, size_t len, const anna_cfg_t *cfg, const char *schema_version);
 int  anna_cfg_save_schema_version_to_nvs(const char *schema_version);
+int  anna_cfg_load_raw_from_nvs(void *out, size_t *inout_len); /* out may be NULL to query size */
+int  anna_cfg_load_schema_version_from_nvs(char *out, size_t *inout_len); /* out may be NULL to query size */
 void anna_cfg_nvs_init(void);
 
 #ifdef __cplusplus

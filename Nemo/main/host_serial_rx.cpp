@@ -86,6 +86,87 @@ static void emit_file_ack(const char *file, bool ok, const char *reason_or_null)
     fflush(stdout);
 }
 
+#if CONFIG_ANNA_CLOUD_SYNC_TEST_HARNESS
+static void emit_test_harness_ack(bool ok, const char *mode_or_null, const char *reason_or_null)
+{
+    const char *mode = mode_or_null ? mode_or_null : "unknown";
+    if (ok) {
+        printf("{\"type\":\"test_harness_ack\",\"feature\":\"cloud_sync\",\"ok\":true,\"mode\":\"%s\"}\n", mode);
+    } else {
+        const char *reason = reason_or_null ? reason_or_null : "BAD_FORMAT";
+        printf("{\"type\":\"test_harness_ack\",\"feature\":\"cloud_sync\",\"ok\":false,\"mode\":\"%s\",\"reason\":\"%s\"}\n",
+               mode, reason);
+    }
+    fflush(stdout);
+}
+
+static esp_err_t handle_set_cloud_sync_test_harness(cJSON *root)
+{
+    const cJSON *j_mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    if (!cJSON_IsString(j_mode) || !j_mode->valuestring) {
+        emit_test_harness_ack(false, nullptr, "BAD_FORMAT");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (strcmp(j_mode->valuestring, "FORCE_PULL_ON_NEXT_IP") == 0) {
+        esp_err_t err =
+            (esp_err_t) anna_state_set_cloud_sync_test_intent(ANNA_CLOUD_SYNC_TEST_INTENT_FORCE_PULL_ON_NEXT_IP);
+        if (err != ESP_OK) {
+            emit_test_harness_ack(false, j_mode->valuestring, "WRITE_FAIL");
+            return err;
+        }
+        emit_test_harness_ack(true, j_mode->valuestring, nullptr);
+        return ESP_OK;
+    }
+
+    if (strcmp(j_mode->valuestring, "DEFER_PRIMARY_TO_NEXT_IP") == 0) {
+        esp_err_t err =
+            (esp_err_t) anna_state_set_cloud_sync_test_intent(ANNA_CLOUD_SYNC_TEST_INTENT_DEFER_PRIMARY_TO_NEXT_IP);
+        if (err != ESP_OK) {
+            emit_test_harness_ack(false, j_mode->valuestring, "WRITE_FAIL");
+            return err;
+        }
+        emit_test_harness_ack(true, j_mode->valuestring, nullptr);
+        return ESP_OK;
+    }
+
+    if (strcmp(j_mode->valuestring, "FORCE_PRE_APPLY_LATE_WINDOW_CLOSE") == 0) {
+        esp_err_t err =
+            (esp_err_t) anna_state_set_cloud_sync_test_intent(ANNA_CLOUD_SYNC_TEST_INTENT_FORCE_PRE_APPLY_LATE_WINDOW_CLOSE);
+        if (err != ESP_OK) {
+            emit_test_harness_ack(false, j_mode->valuestring, "WRITE_FAIL");
+            return err;
+        }
+        emit_test_harness_ack(true, j_mode->valuestring, nullptr);
+        return ESP_OK;
+    }
+
+    if (strcmp(j_mode->valuestring, "FORCE_PRE_APPLY_POST_FABRIC_CLOSE") == 0) {
+        esp_err_t err =
+            (esp_err_t) anna_state_set_cloud_sync_test_intent(ANNA_CLOUD_SYNC_TEST_INTENT_FORCE_PRE_APPLY_POST_FABRIC_CLOSE);
+        if (err != ESP_OK) {
+            emit_test_harness_ack(false, j_mode->valuestring, "WRITE_FAIL");
+            return err;
+        }
+        emit_test_harness_ack(true, j_mode->valuestring, nullptr);
+        return ESP_OK;
+    }
+
+    if (strcmp(j_mode->valuestring, "CLEAR") == 0) {
+        esp_err_t err = (esp_err_t) anna_state_clear_cloud_sync_test_intent();
+        if (err != ESP_OK) {
+            emit_test_harness_ack(false, j_mode->valuestring, "WRITE_FAIL");
+            return err;
+        }
+        emit_test_harness_ack(true, j_mode->valuestring, nullptr);
+        return ESP_OK;
+    }
+
+    emit_test_harness_ack(false, j_mode->valuestring, "BAD_FORMAT");
+    return ESP_ERR_INVALID_ARG;
+}
+#endif
+
 static void emit_file_ack_crc_mismatch_with_data(const char *file,
                                                  const char *expected_crc32c_upper,
                                                  const char *actual_crc32c_upper,
@@ -439,6 +520,10 @@ static void host_serial_rx_task(void *arg)
                 (void)handle_request_board_info(emit_board_info_fn);
             } else if (strcmp(j_cmd->valuestring, "FILE_SEND") == 0) {
                 (void)handle_file_send(root);
+#if CONFIG_ANNA_CLOUD_SYNC_TEST_HARNESS
+            } else if (strcmp(j_cmd->valuestring, "SET_CLOUD_SYNC_TEST_HARNESS") == 0) {
+                (void)handle_set_cloud_sync_test_harness(root);
+#endif
             } else {
                 // 알 수 없는 cmd는 무시(향후 확장)
             }
@@ -461,4 +546,3 @@ void anna_host_serial_rx_start(void)
         ESP_LOGE(TAG, "failed to create host_serial_rx_task");
     }
 }
-

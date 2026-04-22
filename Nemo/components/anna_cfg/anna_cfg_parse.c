@@ -12,6 +12,10 @@
 #include "anna_cfg.h"
 
 static const char *TAG = "anna_cfg_parse";
+static anna_cfg_t *s_live_cfg_target = &g_anna_cfg;
+static anna_cfg_t *s_cfg_parse_target = &g_anna_cfg;
+
+#define g_anna_cfg (*s_cfg_parse_target)
 
 
 /* -------------------------------------------------------------------------- */
@@ -537,9 +541,9 @@ static esp_err_t parse_con_swt_array_cjson(const cJSON *arr)
     return ESP_OK;
 }
 
-int anna_cfg_parse_json(const char *js, size_t len)
+int anna_cfg_parse_json_into(const char *js, size_t len, anna_cfg_t *out_cfg)
 {
-    if (!js || len == 0) return ESP_ERR_INVALID_ARG;
+    if (!js || len == 0 || !out_cfg) return ESP_ERR_INVALID_ARG;
 
     /* 안전을 위해 무조건 len+1 버퍼로 복사하여 NUL-terminate 보장 */
     char *buf = (char *)malloc(len + 1);
@@ -560,6 +564,8 @@ int anna_cfg_parse_json(const char *js, size_t len)
         return ESP_FAIL;
     }
 
+    anna_cfg_t *prev_target = s_cfg_parse_target;
+    s_cfg_parse_target = out_cfg;
     cfg_reset_defaults();
 
     /* 제품 정보: ProductInfo(신) 우선, DeviceInfo(구) fallback */
@@ -572,12 +578,14 @@ int anna_cfg_parse_json(const char *js, size_t len)
         derr = parse_product_info_like_object(j_di, false);
     } else {
         ESP_LOGE(TAG, "missing ProductInfo/DeviceInfo");
+        s_cfg_parse_target = prev_target;
         cJSON_Delete(root);
         free(buf);
         return ESP_FAIL;
     }
     if (derr != ESP_OK) {
         ESP_LOGE(TAG, "device info parse failed");
+        s_cfg_parse_target = prev_target;
         cJSON_Delete(root);
         free(buf);
         return ESP_FAIL;
@@ -595,6 +603,7 @@ int anna_cfg_parse_json(const char *js, size_t len)
     if (j_btn) {
         if (parse_button_array_cjson(j_btn, !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "Button"))) != ESP_OK) {
             ESP_LOGE(TAG, "Button/OneAct parse failed");
+            s_cfg_parse_target = prev_target;
             cJSON_Delete(root);
             free(buf);
             return ESP_FAIL;
@@ -606,6 +615,7 @@ int anna_cfg_parse_json(const char *js, size_t len)
     if (j_swt) {
         if (parse_switch_array_cjson(j_swt, !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "Switch"))) != ESP_OK) {
             ESP_LOGE(TAG, "Switch/NorAct parse failed");
+            s_cfg_parse_target = prev_target;
             cJSON_Delete(root);
             free(buf);
             return ESP_FAIL;
@@ -616,6 +626,7 @@ int anna_cfg_parse_json(const char *js, size_t len)
     if (j_modes) {
         if (parse_modes_object_cjson(j_modes) != ESP_OK) {
             ESP_LOGE(TAG, "Modes parse failed");
+            s_cfg_parse_target = prev_target;
             cJSON_Delete(root);
             free(buf);
             return ESP_FAIL;
@@ -626,6 +637,7 @@ int anna_cfg_parse_json(const char *js, size_t len)
     if (j_con_btn) {
         if (parse_con_btn_array_cjson(j_con_btn) != ESP_OK) {
             ESP_LOGE(TAG, "ConButton parse failed");
+            s_cfg_parse_target = prev_target;
             cJSON_Delete(root);
             free(buf);
             return ESP_FAIL;
@@ -636,13 +648,20 @@ int anna_cfg_parse_json(const char *js, size_t len)
     if (j_con_swt) {
         if (parse_con_swt_array_cjson(j_con_swt) != ESP_OK) {
             ESP_LOGE(TAG, "ConSwitch parse failed");
+            s_cfg_parse_target = prev_target;
             cJSON_Delete(root);
             free(buf);
             return ESP_FAIL;
         }
     }
 
+    s_cfg_parse_target = prev_target;
     cJSON_Delete(root);
     free(buf);
     return ESP_OK;
+}
+
+int anna_cfg_parse_json(const char *js, size_t len)
+{
+    return anna_cfg_parse_json_into(js, len, s_live_cfg_target);
 }

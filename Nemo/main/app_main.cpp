@@ -35,6 +35,7 @@
 
 #include "app_priv.h"
 #include "anna_cfg.h"
+#include "anna_cloud_sync.h"
 #include "anna_factory_reset.h"
 #include "anna_state_storage.h"
 #include "host_serial_rx.h"
@@ -120,14 +121,7 @@ typedef struct {
     char     mac_addr[18]; /* "AA:BB:CC:DD:EE:FF" + '\0' */
 } board_identity_t;
 
-#ifdef CONFIG_ENABLE_SET_CERT_DECLARATION_API
-#ifdef CONFIG_SEC_CERT_DAC_PROVIDER
-#include <platform/ESP32/ESP32SecureCertDACProvider.h>
-#elif defined(CONFIG_FACTORY_PARTITION_DAC_PROVIDER)
-#include <platform/ESP32/ESP32FactoryDataProvider.h>
-#endif
 using namespace chip::DeviceLayer;
-#endif
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -153,13 +147,6 @@ static constexpr uint8_t kPowerCycleResetThreshold = 5;
 static constexpr uint32_t kPowerCycleClearWindowMs = 10000;
 static TimerHandle_t s_power_cycle_clear_timer = nullptr;
 static bool s_power_cycle_clear_timer_armed = false;
-
-#ifdef CONFIG_ENABLE_SET_CERT_DECLARATION_API
-extern const uint8_t cd_start[] asm("_binary_certification_declaration_der_start");
-extern const uint8_t cd_end[] asm("_binary_certification_declaration_der_end");
-
-const chip::ByteSpan cdSpan(cd_start, static_cast<size_t>(cd_end - cd_start));
-#endif // CONFIG_ENABLE_SET_CERT_DECLARATION_API
 
 #if CONFIG_ENABLE_ENCRYPTED_OTA
 extern const char decryption_key_start[] asm("_binary_esp_image_encryption_key_pem_start");
@@ -475,6 +462,9 @@ static void maybe_arm_power_cycle_factory_reset(void)
 
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
+    (void)arg;
+    anna_cloud_sync_handle_device_event(event);
+
     switch (event->Type) {
     case chip::DeviceLayer::DeviceEventType::kInterfaceIpAddressChanged:
         ESP_LOGI(TAG, "Interface IP Address changed");
@@ -685,15 +675,6 @@ extern "C" void app_main()
     memory_profiler_dump_heap_stat("settings_init");
 #endif
 
-#ifdef CONFIG_ENABLE_SET_CERT_DECLARATION_API
-    auto * dac_provider = get_dac_provider();
-#ifdef CONFIG_SEC_CERT_DAC_PROVIDER
-    static_cast<ESP32SecureCertDACProvider *>(dac_provider)->SetCertificationDeclaration(cdSpan);
-#elif defined(CONFIG_FACTORY_PARTITION_DAC_PROVIDER)
-    static_cast<ESP32FactoryDataProvider *>(dac_provider)->SetCertificationDeclaration(cdSpan);
-#endif
-#endif // CONFIG_ENABLE_SET_CERT_DECLARATION_API
-
     /* Matter start */
 #if CONFIG_CUSTOM_COMMISSIONABLE_DATA_PROVIDER
     // Custom CommissionableDataProvider는 esp_matter::start() 내부 setup_providers()에서 적용되므로,
@@ -717,6 +698,8 @@ extern "C" void app_main()
     esp_matter::set_custom_device_info_provider(&s_anna_device_info_provider);
     ESP_LOGI(TAG, "Registered custom DeviceInfoProvider (AnnaDeviceInfoProvider)");
 #endif
+
+    anna_cloud_sync_init();
 
     err = esp_matter::start(app_event_cb);
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));

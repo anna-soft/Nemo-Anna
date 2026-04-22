@@ -11,6 +11,7 @@
 #include <esp_err.h>
 #include <esp_matter.h>
 #include <driver/gpio.h>
+#include "anna_cfg.h"
 #include "led_controller.h"
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include "esp_openthread_types.h"
@@ -23,10 +24,21 @@ enum {
     ENDPOINT_ID_INVALID = 0xFFFF,
 };
 
+typedef struct {
+    uint16_t mode[ANNA_MAX_MODE_COUNT];
+    uint16_t button[ANNA_MAX_BUTTON];
+    uint16_t swt[ANNA_MAX_SWITCH];
+    uint16_t con_btn[ANNA_MAX_CON_ACT];
+    uint16_t con_swt[ANNA_MAX_CON_SWT_ACT];
+} anna_endpoint_reuse_plan_t;
+
 
 void settings_init(esp_matter::node_t *node);
 
 void settings_post_esp_start_init(void);
+esp_matter::node_t * app_settings_get_runtime_node(void);
+void app_settings_clear_runtime_state(void);
+esp_err_t app_settings_rebuild_from_current_cfg(const anna_endpoint_reuse_plan_t *reuse_plan);
 
 esp_err_t app_driver_led_init();
 
@@ -68,10 +80,12 @@ void app_driver_queue_mode_apply(void);
 #ifdef __cplusplus
 extern "C" void app_driver_boot_reconcile_mode_only(void);
 extern "C" void app_driver_boot_safe_off_sync_non_mode(void);
+extern "C" void app_driver_runtime_clear_state(void);
 extern "C" {
 #else
 void app_driver_boot_reconcile_mode_only(void);
 void app_driver_boot_safe_off_sync_non_mode(void);
+void app_driver_runtime_clear_state(void);
 #endif
 
 #ifdef __cplusplus

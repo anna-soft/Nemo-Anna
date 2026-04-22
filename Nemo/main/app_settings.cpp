@@ -35,6 +35,7 @@ using UserLabelType =
 
 
 static const char *TAG = "app_settings";
+static node_t *s_runtime_node = nullptr;
 /* ---- con_btn: boolean sensor IRQ plumbing ---- */
 static bool s_bs_isr_installed = false;
 static bool s_bs_pin_inited[32] = {false};
@@ -327,7 +328,71 @@ static bool is_created_ep(uint16_t ep_id)
     return false;
 }
 
-static uint16_t create_on_off_endpoint(node_t *node, bool initial_on, bool add_fixed_label, const char *type_name, int index)
+static uint16_t resolve_reuse_endpoint_id(const anna_endpoint_reuse_plan_t *reuse_plan, const char *type_name, int index)
+{
+    if (!reuse_plan || !type_name || index < 0) {
+        return ENDPOINT_ID_INVALID;
+    }
+
+    if (strcmp(type_name, "mode") == 0 && index < ANNA_MAX_MODE_COUNT) {
+        return reuse_plan->mode[index];
+    }
+    if (strcmp(type_name, "button") == 0 && index < ANNA_MAX_BUTTON) {
+        return reuse_plan->button[index];
+    }
+    if (strcmp(type_name, "switch") == 0 && index < ANNA_MAX_SWITCH) {
+        return reuse_plan->swt[index];
+    }
+    if (strcmp(type_name, "con_btn") == 0 && index < ANNA_MAX_CON_ACT) {
+        return reuse_plan->con_btn[index];
+    }
+    if (strcmp(type_name, "con_swt") == 0 && index < ANNA_MAX_CON_SWT_ACT) {
+        return reuse_plan->con_swt[index];
+    }
+    return ENDPOINT_ID_INVALID;
+}
+
+static endpoint_t *resume_on_off_endpoint(node_t *node, on_off_plugin_unit::config_t *plugin_unit_config, bool add_fixed_label,
+                                          uint16_t endpoint_id, const char *type_name, int index)
+{
+    endpoint_t *ep_on_off_plugin = endpoint::resume(node, ENDPOINT_FLAG_DESTROYABLE, endpoint_id, NULL);
+    ABORT_APP_ON_FAILURE(ep_on_off_plugin != nullptr,
+                         ESP_LOGE(TAG, "Failed to resume on_off_plugin_unit for %s[%d] ep=%u", type_name, index,
+                                  (unsigned)endpoint_id));
+
+    cluster_t *descriptor_cluster = descriptor::create(ep_on_off_plugin, &(plugin_unit_config->descriptor), CLUSTER_FLAG_SERVER);
+    ABORT_APP_ON_FAILURE(descriptor_cluster != nullptr,
+                         ESP_LOGE(TAG, "Failed to create descriptor cluster for %s[%d] ep=%u", type_name, index,
+                                  (unsigned)endpoint_id));
+
+    esp_err_t add_err = on_off_plugin_unit::add(ep_on_off_plugin, plugin_unit_config);
+    ABORT_APP_ON_FAILURE(add_err == ESP_OK,
+                         ESP_LOGE(TAG, "Failed to add on_off_plugin_unit for %s[%d] ep=%u err=%d", type_name, index,
+                                  (unsigned)endpoint_id, (int)add_err));
+
+    user_label::config_t label_config = {};
+    cluster_t *label_cluster = user_label::create(ep_on_off_plugin, &label_config, CLUSTER_FLAG_SERVER);
+    ABORT_APP_ON_FAILURE(label_cluster != nullptr,
+                         ESP_LOGE(TAG, "Failed to create user label cluster for %s[%d] ep=%u", type_name, index,
+                                  (unsigned)endpoint_id));
+
+#if CONFIG_SUPPORT_FIXED_LABEL_CLUSTER
+    if (add_fixed_label) {
+        fixed_label::config_t fixed_label_config = {};
+        cluster_t *fixed_label_cluster = fixed_label::create(ep_on_off_plugin, &fixed_label_config, CLUSTER_FLAG_SERVER);
+        ABORT_APP_ON_FAILURE(fixed_label_cluster != nullptr,
+                             ESP_LOGE(TAG, "Failed to create fixed label cluster for %s[%d] ep=%u", type_name, index,
+                                      (unsigned)endpoint_id));
+    }
+#else
+    (void)add_fixed_label;
+#endif
+
+    return ep_on_off_plugin;
+}
+
+static uint16_t create_on_off_endpoint_with_reuse(node_t *node, bool initial_on, bool add_fixed_label, const char *type_name,
+                                                  int index, const anna_endpoint_reuse_plan_t *reuse_plan)
 {
     on_off_plugin_unit::config_t plugin_unit_config = {};
     bool is_mode_endpoint = (type_name != nullptr) && (strcmp(type_name, "mode") == 0);
@@ -342,29 +407,41 @@ static uint16_t create_on_off_endpoint(node_t *node, bool initial_on, bool add_f
         plugin_unit_config.on_off.on_off = true;
     }
 
-    endpoint_t *ep_on_off_plugin = on_off_plugin_unit::create(node, &plugin_unit_config, ENDPOINT_FLAG_NONE, NULL);
-    ABORT_APP_ON_FAILURE(ep_on_off_plugin != nullptr,
-                         ESP_LOGE(TAG, "Failed to create on_off_plugin_unit for %s[%d]", type_name, index));
+    uint16_t reuse_endpoint_id = resolve_reuse_endpoint_id(reuse_plan, type_name, index);
+    endpoint_t *ep_on_off_plugin = nullptr;
+    if (reuse_endpoint_id != ENDPOINT_ID_INVALID) {
+        ep_on_off_plugin =
+                resume_on_off_endpoint(node, &plugin_unit_config, add_fixed_label, reuse_endpoint_id, type_name, index);
+    } else {
+        ep_on_off_plugin = on_off_plugin_unit::create(node, &plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, NULL);
+        ABORT_APP_ON_FAILURE(ep_on_off_plugin != nullptr,
+                             ESP_LOGE(TAG, "Failed to create on_off_plugin_unit for %s[%d]", type_name, index));
 
-    user_label::config_t label_config = {};
-    cluster_t *label_cluster = user_label::create(ep_on_off_plugin, &label_config, CLUSTER_FLAG_SERVER);
-    ABORT_APP_ON_FAILURE(label_cluster != nullptr,
-                         ESP_LOGE(TAG, "Failed to create user label cluster for %s[%d]", type_name, index));
+        user_label::config_t label_config = {};
+        cluster_t *label_cluster = user_label::create(ep_on_off_plugin, &label_config, CLUSTER_FLAG_SERVER);
+        ABORT_APP_ON_FAILURE(label_cluster != nullptr,
+                             ESP_LOGE(TAG, "Failed to create user label cluster for %s[%d]", type_name, index));
 
 #if CONFIG_SUPPORT_FIXED_LABEL_CLUSTER
-    if (add_fixed_label) {
-        fixed_label::config_t fixed_label_config = {};
-        cluster_t *fixed_label_cluster = fixed_label::create(ep_on_off_plugin, &fixed_label_config, CLUSTER_FLAG_SERVER);
-        ABORT_APP_ON_FAILURE(fixed_label_cluster != nullptr,
-                             ESP_LOGE(TAG, "Failed to create fixed label cluster for %s[%d]", type_name, index));
-    }
+        if (add_fixed_label) {
+            fixed_label::config_t fixed_label_config = {};
+            cluster_t *fixed_label_cluster = fixed_label::create(ep_on_off_plugin, &fixed_label_config, CLUSTER_FLAG_SERVER);
+            ABORT_APP_ON_FAILURE(fixed_label_cluster != nullptr,
+                                 ESP_LOGE(TAG, "Failed to create fixed label cluster for %s[%d]", type_name, index));
+        }
 #else
-    (void)add_fixed_label;
+        (void)add_fixed_label;
 #endif
+    }
 
     uint16_t ep_id = endpoint::get_id(ep_on_off_plugin);
     record_created_ep(ep_id);
     return ep_id;
+}
+
+static uint16_t create_on_off_endpoint(node_t *node, bool initial_on, bool add_fixed_label, const char *type_name, int index)
+{
+    return create_on_off_endpoint_with_reuse(node, initial_on, add_fixed_label, type_name, index, nullptr);
 }
 
 typedef struct {
@@ -546,45 +623,8 @@ static void sync_led_with_persisted_mode()
     app_driver_boot_reconcile_mode_only();
 }
 
-void settings_init(node_t *node) {
-    esp_err_t err = ESP_OK;
-
-    ESP_LOGI(TAG, "settings_init start");
-
-    int number_ep = 0;
-    s_created_ep_count = 0;
-    s_created_ep_overflow_warned = false;
-
-    /* Initialize modes settings first. mode_count is signed and can be -1(null). */
-    int mode_count = (int)g_anna_cfg.modes.mode_count;
-    for (int i = 0; i < mode_count; ++i) {
-        bool initial_on = (i == 0);
-        g_anna_cfg.modes.endpoint_id[i] = create_on_off_endpoint(node, initial_on, false, "mode", i);
-        ++number_ep;
-    }
-
-    for (int i = 0; i < g_anna_cfg.button_cnt; ++i) {
-        g_anna_cfg.a_button[i].base.endpoint_id = create_on_off_endpoint(node, false, true, "button", i);
-        ++number_ep;
-    }
-    for (int i = 0; i < g_anna_cfg.switch_cnt; ++i) {
-        g_anna_cfg.a_switch[i].base.endpoint_id = create_on_off_endpoint(node, false, true, "switch", i);
-        ++number_ep;
-    }
-    for (int i = 0; i < g_anna_cfg.con_btn_cnt; ++i) {
-        g_anna_cfg.con_btn[i].base.endpoint_id = create_on_off_endpoint(node, false, true, "con_btn", i);
-        ++number_ep;
-    }
-    for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
-        g_anna_cfg.con_swt[i].base.endpoint_id = create_on_off_endpoint(node, false, true, "con_swt", i);
-        ++number_ep;
-    }
-
-    log_endpoint_id_collisions();
-
-    err = app_driver_led_init();
-    ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to initialize plug driver"));
-    
+static void init_output_gpios_from_cfg()
+{
     /* Initialize button GPIOs once */
     for (int b = 0; b < g_anna_cfg.button_cnt; ++b) {
         int pin_no = (int)g_anna_cfg.a_button[b].base.pin_no;
@@ -607,7 +647,6 @@ void settings_init(node_t *node) {
         if (GPIO_IS_VALID_GPIO(gpio)) {
             gpio_reset_pin(gpio);
             gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
-            // default LOW
             gpio_set_level(gpio, 0);
             app_driver_mark_switch_gpio_inited(s);
             ESP_LOGI(TAG, "Switch GPIO init: idx=%d pin=%d (LOW)", s, pin_no);
@@ -645,7 +684,10 @@ void settings_init(node_t *node) {
             ESP_LOGW(TAG, "ConSwt GPIO invalid at init: idx=%d pin=%d", c, pin_no);
         }
     }
+}
 
+static void init_bs_inputs_from_cfg()
+{
     /* Initialize boolean sensor GPIOs (IRQ-based, event-driven) */
     if (!s_bs_isr_queue) {
         s_bs_isr_queue = xQueueCreate(16, sizeof(int));
@@ -663,15 +705,15 @@ void settings_init(node_t *node) {
     for (int c = 0; c < g_anna_cfg.con_btn_cnt; ++c) {
         for (int i = 0; i < ANNA_MAX_CON_BS_COUNT; ++i) {
             int bpin = g_anna_cfg.con_btn[c].bs_pin[i];
-            if (bpin < 0 || bpin >= 32) { 
-                continue; 
+            if (bpin < 0 || bpin >= 32) {
+                continue;
             }
-            if (s_bs_pin_inited[bpin]) { 
-                continue; 
+            if (s_bs_pin_inited[bpin]) {
+                continue;
             }
             gpio_num_t g = (gpio_num_t)bpin;
-            if (!GPIO_IS_VALID_GPIO(g)) { 
-                continue; 
+            if (!GPIO_IS_VALID_GPIO(g)) {
+                continue;
             }
             gpio_reset_pin(g);
             gpio_set_direction(g, GPIO_MODE_INPUT);
@@ -680,7 +722,7 @@ void settings_init(node_t *node) {
                 gpio_install_isr_service(0);
                 s_bs_isr_installed = true;
             }
-            gpio_isr_handler_add(g, con_btn_bs_isr, (void*)(intptr_t)bpin);
+            gpio_isr_handler_add(g, con_btn_bs_isr, (void *)(intptr_t)bpin);
             s_bs_pin_inited[bpin] = true;
             s_bs_cached_level[bpin] = (uint8_t)gpio_get_level(g);
             ESP_LOGI(TAG, "ConBtn BS GPIO init, con_btn[%d].bs_pin[%d]: pin=%d (IRQ ANYEDGE)", c, i, bpin);
@@ -691,15 +733,15 @@ void settings_init(node_t *node) {
     for (int c = 0; c < g_anna_cfg.con_swt_cnt; ++c) {
         for (int i = 0; i < ANNA_MAX_CON_BS_COUNT; ++i) {
             int bpin = g_anna_cfg.con_swt[c].bs_pin[i];
-            if (bpin < 0 || bpin >= 32) { 
-                continue; 
+            if (bpin < 0 || bpin >= 32) {
+                continue;
             }
-            if (s_bs_pin_inited[bpin]) { 
-                continue; 
+            if (s_bs_pin_inited[bpin]) {
+                continue;
             }
             gpio_num_t g = (gpio_num_t)bpin;
-            if (!GPIO_IS_VALID_GPIO(g)) { 
-                continue; 
+            if (!GPIO_IS_VALID_GPIO(g)) {
+                continue;
             }
             gpio_reset_pin(g);
             gpio_set_direction(g, GPIO_MODE_INPUT);
@@ -708,13 +750,16 @@ void settings_init(node_t *node) {
                 gpio_install_isr_service(0);
                 s_bs_isr_installed = true;
             }
-            gpio_isr_handler_add(g, con_btn_bs_isr, (void*)(intptr_t)bpin);
+            gpio_isr_handler_add(g, con_btn_bs_isr, (void *)(intptr_t)bpin);
             s_bs_pin_inited[bpin] = true;
             s_bs_cached_level[bpin] = (uint8_t)gpio_get_level(g);
             ESP_LOGI(TAG, "ConSwt BS GPIO init, con_swt[%d].bs_pin[%d]: pin=%d (IRQ ANYEDGE)", c, i, bpin);
         }
     }
+}
 
+static void init_adc_channels_from_cfg()
+{
     /* Initialize analog sensor ADC channels for con_btn (as_pin) */
     for (int c = 0; c < g_anna_cfg.con_btn_cnt; ++c) {
         for (int i = 0; i < ANNA_MAX_CON_AS_COUNT; ++i) {
@@ -746,6 +791,154 @@ void settings_init(node_t *node) {
             }
         }
     }
+}
+
+static void finalize_dynamic_endpoint_build()
+{
+    log_endpoint_id_collisions();
+    init_output_gpios_from_cfg();
+    init_bs_inputs_from_cfg();
+    init_adc_channels_from_cfg();
+}
+
+static esp_err_t enable_runtime_endpoint_if_started(node_t *node, uint16_t endpoint_id, const char *type_name, int index)
+{
+    if (!is_started() || !node || endpoint_id == ENDPOINT_ID_INVALID || endpoint_id == 0) {
+        return ESP_OK;
+    }
+
+    endpoint_t *endpoint = endpoint::get(node, endpoint_id);
+    if (!endpoint) {
+        ESP_LOGE(TAG, "runtime endpoint publish lookup failed for %s[%d] ep=%u", type_name, index, (unsigned)endpoint_id);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = endpoint::enable(endpoint);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "runtime endpoint publish failed for %s[%d] ep=%u err=%s", type_name, index, (unsigned)endpoint_id,
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "runtime endpoint published: %s[%d] ep=%u", type_name, index, (unsigned)endpoint_id);
+    return ESP_OK;
+}
+
+static esp_err_t rebuild_dynamic_endpoints_from_current_cfg(node_t *node, const anna_endpoint_reuse_plan_t *reuse_plan)
+{
+    if (!node) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    s_created_ep_count = 0;
+    s_created_ep_overflow_warned = false;
+
+    int mode_count = (int)g_anna_cfg.modes.mode_count;
+    for (int i = 0; i < mode_count; ++i) {
+        bool initial_on = (i == 0);
+        g_anna_cfg.modes.endpoint_id[i] = create_on_off_endpoint_with_reuse(node, initial_on, false, "mode", i, reuse_plan);
+        esp_err_t err = enable_runtime_endpoint_if_started(node, g_anna_cfg.modes.endpoint_id[i], "mode", i);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    for (int i = 0; i < g_anna_cfg.button_cnt; ++i) {
+        g_anna_cfg.a_button[i].base.endpoint_id = create_on_off_endpoint_with_reuse(node, false, true, "button", i, reuse_plan);
+        esp_err_t err = enable_runtime_endpoint_if_started(node, g_anna_cfg.a_button[i].base.endpoint_id, "button", i);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    for (int i = 0; i < g_anna_cfg.switch_cnt; ++i) {
+        g_anna_cfg.a_switch[i].base.endpoint_id = create_on_off_endpoint_with_reuse(node, false, true, "switch", i, reuse_plan);
+        esp_err_t err = enable_runtime_endpoint_if_started(node, g_anna_cfg.a_switch[i].base.endpoint_id, "switch", i);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    for (int i = 0; i < g_anna_cfg.con_btn_cnt; ++i) {
+        g_anna_cfg.con_btn[i].base.endpoint_id = create_on_off_endpoint_with_reuse(node, false, true, "con_btn", i, reuse_plan);
+        esp_err_t err = enable_runtime_endpoint_if_started(node, g_anna_cfg.con_btn[i].base.endpoint_id, "con_btn", i);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
+        g_anna_cfg.con_swt[i].base.endpoint_id = create_on_off_endpoint_with_reuse(node, false, true, "con_swt", i, reuse_plan);
+        esp_err_t err = enable_runtime_endpoint_if_started(node, g_anna_cfg.con_swt[i].base.endpoint_id, "con_swt", i);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    finalize_dynamic_endpoint_build();
+    return ESP_OK;
+}
+
+esp_matter::node_t *app_settings_get_runtime_node(void)
+{
+    return s_runtime_node;
+}
+
+void app_settings_clear_runtime_state(void)
+{
+    for (int pin = 0; pin < 32; ++pin) {
+        void *ctx = (void *)(intptr_t)pin;
+        chip::DeviceLayer::SystemLayer().CancelTimer(con_btn_bs_db_timer_handler, ctx);
+        s_bs_db_timer_armed[pin] = false;
+        s_bs_cached_level[pin] = 0;
+        if (s_bs_pin_inited[pin]) {
+            gpio_num_t gpio = static_cast<gpio_num_t>(pin);
+            if (GPIO_IS_VALID_GPIO(gpio)) {
+                gpio_isr_handler_remove(gpio);
+            }
+            s_bs_pin_inited[pin] = false;
+        }
+    }
+
+    s_created_ep_count = 0;
+    s_created_ep_overflow_warned = false;
+}
+
+esp_err_t app_settings_rebuild_from_current_cfg(const anna_endpoint_reuse_plan_t *reuse_plan)
+{
+    return rebuild_dynamic_endpoints_from_current_cfg(s_runtime_node, reuse_plan);
+}
+
+void settings_init(node_t *node) {
+    esp_err_t err = ESP_OK;
+
+    ESP_LOGI(TAG, "settings_init start");
+
+    s_runtime_node = node;
+
+    s_created_ep_count = 0;
+    s_created_ep_overflow_warned = false;
+
+    int mode_count = (int)g_anna_cfg.modes.mode_count;
+    for (int i = 0; i < mode_count; ++i) {
+        bool initial_on = (i == 0);
+        g_anna_cfg.modes.endpoint_id[i] = create_on_off_endpoint(node, initial_on, false, "mode", i);
+    }
+
+    for (int i = 0; i < g_anna_cfg.button_cnt; ++i) {
+        g_anna_cfg.a_button[i].base.endpoint_id = create_on_off_endpoint(node, false, true, "button", i);
+    }
+    for (int i = 0; i < g_anna_cfg.switch_cnt; ++i) {
+        g_anna_cfg.a_switch[i].base.endpoint_id = create_on_off_endpoint(node, false, true, "switch", i);
+    }
+    for (int i = 0; i < g_anna_cfg.con_btn_cnt; ++i) {
+        g_anna_cfg.con_btn[i].base.endpoint_id = create_on_off_endpoint(node, false, true, "con_btn", i);
+    }
+    for (int i = 0; i < g_anna_cfg.con_swt_cnt; ++i) {
+        g_anna_cfg.con_swt[i].base.endpoint_id = create_on_off_endpoint(node, false, true, "con_swt", i);
+    }
+
+    finalize_dynamic_endpoint_build();
+
+    err = app_driver_led_init();
+    ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to initialize plug driver"));
 
     ESP_LOGI(TAG, "settings_init end");
 }

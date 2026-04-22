@@ -5,10 +5,6 @@
 #                       INCLUDE_DIRS "."
 #                       REQUIRES "esp_matter" "led_controller" "anna_cfg")
 
-# if (CONFIG_ENABLE_SET_CERT_DECLARATION_API)
-#     target_add_binary_data(${COMPONENT_TARGET} "certification_declaration/certification_declaration.der" BINARY)
-# endif()
-
 # set_property(TARGET ${COMPONENT_LIB} PROPERTY CXX_STANDARD 17)
 # target_compile_options(${COMPONENT_LIB} PRIVATE "-DCHIP_HAVE_CONFIG_H")
 
@@ -19,13 +15,8 @@ idf_component_register(
         "." 
         "${ESP_MATTER_PATH}/examples/common/utils" 
 
-    REQUIRES esp_matter anna_cfg nvs_flash led_controller mode_manager esp_adc json mbedtls
+    REQUIRES esp_matter anna_cfg nvs_flash led_controller mode_manager esp_adc json mbedtls esp_http_client esp-tls
 )
-
-if (CONFIG_ENABLE_SET_CERT_DECLARATION_API)
-    target_add_binary_data(${COMPONENT_TARGET} "certification_declaration/certification_declaration.der" BINARY)
-endif()
 
 set_property(TARGET ${COMPONENT_LIB} PROPERTY CXX_STANDARD 17)
 target_compile_options(${COMPONENT_LIB} PRIVATE "-DCHIP_HAVE_CONFIG_H")
-

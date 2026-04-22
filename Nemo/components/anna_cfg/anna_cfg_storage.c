@@ -19,6 +19,55 @@ anna_cfg_t g_anna_cfg; /* zero-init BSS */
 
 static const char *TAG = "anna_cfg_storage";
 
+static esp_err_t open_cfg(nvs_handle_t *out_handle, nvs_open_mode_t mode)
+{
+    if (!out_handle) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return nvs_open_from_partition(ANNA_RT_PARTITION_NAME, ANNA_CFG_NAMESPACE, mode, out_handle);
+}
+
+static esp_err_t save_snapshot_internal(nvs_handle_t nvs_handle, const char *json, size_t json_len,
+                                        const anna_cfg_t *cfg, const char *schema_version)
+{
+    if (!json || json_len == 0 || !cfg) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (json_len > ANNA_CFG_MAX_SIZE) {
+        ESP_LOGE(TAG, "config too large (%u)", (unsigned)json_len);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = nvs_set_blob(nvs_handle, ANNA_CFG_KEY, json, json_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_blob(json) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_blob(nvs_handle, ANNA_CFG_STRUCT_KEY, cfg, sizeof(*cfg));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_blob(cfg_blob) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_u32(nvs_handle, ANNA_CFG_SW_VER_KEY, cfg->product_info.sw_ver);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_set_u32(sw_ver=%lu) failed: %s",
+                 (unsigned long)cfg->product_info.sw_ver, esp_err_to_name(err));
+        return err;
+    }
+
+    if (schema_version && schema_version[0] != '\0') {
+        err = nvs_set_str(nvs_handle, ANNA_CFG_SCHEMA_VERSION_KEY, schema_version);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "nvs_set_str(schema_version) failed: %s", esp_err_to_name(err));
+            return err;
+        }
+    }
+
+    return nvs_commit(nvs_handle);
+}
+
 /* Call once, early in boot */
 void anna_cfg_nvs_init(void)
 {
@@ -44,35 +93,36 @@ void anna_cfg_nvs_init(void)
 
 int anna_cfg_save_to_nvs(const char *json, size_t json_len)
 {
-    if (!json || !json_len) return ESP_FAIL;
+    if (!json || json_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (json_len > ANNA_CFG_MAX_SIZE) {
         ESP_LOGE(TAG, "config too large (%u)", (unsigned)json_len);
         return ESP_ERR_NO_MEM;
     }
 
     nvs_handle_t nvs_handle;
-    ESP_RETURN_ON_ERROR(nvs_open_from_partition(ANNA_RT_PARTITION_NAME, ANNA_CFG_NAMESPACE, NVS_READWRITE, &nvs_handle), TAG, "open");
+    ESP_RETURN_ON_ERROR(open_cfg(&nvs_handle, NVS_READWRITE), TAG, "open");
 
     esp_err_t err = nvs_set_blob(nvs_handle, ANNA_CFG_KEY, json, json_len);
     if (err == ESP_OK) {
-        /* 추가: 현재 g_anna_cfg 구조체도 함께 저장 */
         err = nvs_set_blob(nvs_handle, ANNA_CFG_STRUCT_KEY, &g_anna_cfg, sizeof(g_anna_cfg));
-        if (err == ESP_OK) {
-            /* 버전 체크 역할은 ProductInfo.SoftwareVersion(sw_ver)이 맡는다. */
-            err = nvs_set_u32(nvs_handle, ANNA_CFG_SW_VER_KEY, g_anna_cfg.product_info.sw_ver);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "nvs_set_u32(sw_ver=%lu) failed: %s",
-                         (unsigned long)g_anna_cfg.product_info.sw_ver, esp_err_to_name(err));
-            }
-        } else {
-            ESP_LOGE(TAG, "nvs_set_blob(g_anna_cfg) failed: %s", esp_err_to_name(err));
-        }
-    } else {
-        ESP_LOGE(TAG, "nvs_set_blob(json) failed: %s", esp_err_to_name(err));
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u32(nvs_handle, ANNA_CFG_SW_VER_KEY, g_anna_cfg.product_info.sw_ver);
     }
     if (err == ESP_OK) {
         err = nvs_commit(nvs_handle);
     }
+    nvs_close(nvs_handle);
+    return err;
+}
+
+int anna_cfg_save_snapshot_to_nvs(const char *json, size_t json_len, const anna_cfg_t *cfg, const char *schema_version)
+{
+    nvs_handle_t nvs_handle;
+    ESP_RETURN_ON_ERROR(open_cfg(&nvs_handle, NVS_READWRITE), TAG, "open");
+    esp_err_t err = save_snapshot_internal(nvs_handle, json, json_len, cfg, schema_version);
     nvs_close(nvs_handle);
     return err;
 }
@@ -83,13 +133,44 @@ int anna_cfg_save_schema_version_to_nvs(const char *schema_version)
         return ESP_ERR_INVALID_ARG;
     }
     nvs_handle_t nvs_handle;
-    ESP_RETURN_ON_ERROR(nvs_open_from_partition(ANNA_RT_PARTITION_NAME, ANNA_CFG_NAMESPACE,
-                                                NVS_READWRITE, &nvs_handle),
+    ESP_RETURN_ON_ERROR(open_cfg(&nvs_handle, NVS_READWRITE),
                         TAG, "open");
     esp_err_t err = nvs_set_str(nvs_handle, ANNA_CFG_SCHEMA_VERSION_KEY, schema_version);
     if (err == ESP_OK) {
         err = nvs_commit(nvs_handle);
     }
+    nvs_close(nvs_handle);
+    return err;
+}
+
+int anna_cfg_load_raw_from_nvs(void *out, size_t *inout_len)
+{
+    if (!inout_len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs_handle;
+    esp_err_t err = open_cfg(&nvs_handle, NVS_READONLY);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_get_blob(nvs_handle, ANNA_CFG_KEY, out, inout_len);
+    nvs_close(nvs_handle);
+    return err;
+}
+
+int anna_cfg_load_schema_version_from_nvs(char *out, size_t *inout_len)
+{
+    if (!inout_len) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs_handle;
+    esp_err_t err = open_cfg(&nvs_handle, NVS_READONLY);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_get_str(nvs_handle, ANNA_CFG_SCHEMA_VERSION_KEY, out, inout_len);
     nvs_close(nvs_handle);
     return err;
 }
@@ -101,7 +182,7 @@ int anna_cfg_load_from_nvs(void)
     size_t anna_len = 0;
 
     /* runtime_anna 하나만 사용한다. */
-    esp_err_t err = nvs_open_from_partition(ANNA_RT_PARTITION_NAME, ANNA_CFG_NAMESPACE, NVS_READONLY, &nvs_handle);
+    esp_err_t err = open_cfg(&nvs_handle, NVS_READONLY);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Open %s Failed: %s", ANNA_RT_PARTITION_NAME, esp_err_to_name(err));
         return err;
@@ -162,8 +243,25 @@ int anna_cfg_load_from_nvs(void)
 
     err = anna_cfg_parse_json(anna_buf, anna_len);
     if (err == ESP_OK) {
-        /* json, g_anna_cfg, sw_ver 저장 */
-        err = anna_cfg_save_to_nvs(anna_buf, anna_len);
+        size_t schema_len = 0;
+        char *schema_buf = NULL;
+        esp_err_t schema_err = anna_cfg_load_schema_version_from_nvs(NULL, &schema_len);
+        if (schema_err == ESP_OK && schema_len > 0) {
+            schema_buf = (char *)calloc(1, schema_len);
+            if (!schema_buf) {
+                free(anna_buf);
+                return ESP_ERR_NO_MEM;
+            }
+            schema_err = anna_cfg_load_schema_version_from_nvs(schema_buf, &schema_len);
+            if (schema_err != ESP_OK) {
+                free(schema_buf);
+                schema_buf = NULL;
+            }
+        }
+
+        /* json, g_anna_cfg, sw_ver, schema_version 저장 */
+        err = anna_cfg_save_snapshot_to_nvs(anna_buf, anna_len, &g_anna_cfg, schema_buf);
+        free(schema_buf);
     }
 
     free(anna_buf);

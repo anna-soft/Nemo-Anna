@@ -110,6 +110,45 @@ namespace {
     static uint16_t s_con_btn_abort_ep[ANNA_MAX_CON_ACT] = {0};
     static bool     s_con_btn_abort_active[ANNA_MAX_CON_ACT] = {false};
 }
+
+extern "C" void app_driver_runtime_clear_state(void)
+{
+    s_last_requested_mode_idx = -1;
+    s_last_request_seq = 0;
+    s_in_apply = false;
+    s_apply_queued = false;
+    s_first_lock_active = false;
+    s_first_lock_idx = -1;
+    s_internal_write = false;
+    s_first_lock_timer_armed = false;
+
+    memset(s_button_cooldown_active, 0, sizeof(s_button_cooldown_active));
+    memset(s_button_cooldown_blocked_count, 0, sizeof(s_button_cooldown_blocked_count));
+    memset(s_button_gpio_inited, 0, sizeof(s_button_gpio_inited));
+
+    memset(s_switch_cooldown_active, 0, sizeof(s_switch_cooldown_active));
+    memset(s_switch_cooldown_blocked_count, 0, sizeof(s_switch_cooldown_blocked_count));
+    memset(s_switch_gpio_inited, 0, sizeof(s_switch_gpio_inited));
+
+    memset(s_con_btn_cooldown_active, 0, sizeof(s_con_btn_cooldown_active));
+    memset(s_con_btn_cooldown_blocked_count, 0, sizeof(s_con_btn_cooldown_blocked_count));
+    memset(s_con_btn_gpio_inited, 0, sizeof(s_con_btn_gpio_inited));
+    s_con_btn_as_timer_armed = false;
+    memset(s_as_db_timer_armed, 0, sizeof(s_as_db_timer_armed));
+
+    memset(s_con_swt_cooldown_active, 0, sizeof(s_con_swt_cooldown_active));
+    memset(s_con_swt_cooldown_blocked_count, 0, sizeof(s_con_swt_cooldown_blocked_count));
+    memset(s_con_swt_gpio_inited, 0, sizeof(s_con_swt_gpio_inited));
+    s_con_swt_as_timer_armed = false;
+    memset(s_con_swt_as_db_timer_armed, 0, sizeof(s_con_swt_as_db_timer_armed));
+    memset(s_con_swt_off_pending, 0, sizeof(s_con_swt_off_pending));
+    memset(s_con_swt_off_block_logged, 0, sizeof(s_con_swt_off_block_logged));
+
+    for (size_t i = 0; i < ANNA_MAX_CON_ACT; ++i) {
+        s_con_btn_abort_ep[i] = ENDPOINT_ID_INVALID;
+        s_con_btn_abort_active[i] = false;
+    }
+}
 // ---- ConBtn group abort helpers (optional robustness) ----
 static void con_btn_group_abort_mark(uint16_t ep)
 {
