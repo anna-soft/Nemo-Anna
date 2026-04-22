@@ -18,6 +18,9 @@ Platform concepts and JSON semantics are documented in the top-level Nemo & Anna
 - Anna JSON parsing and runtime apply logic
 - Matter endpoint, cluster, and label mapping
 - Runtime state storage and restore behavior
+- Factory reset and power-cycle recovery
+- Cloud config sync during Matter commissioning
+- Runtime config rebuild without reboot
 
 ## Current Scope
 
@@ -25,8 +28,7 @@ Current reference profile:
 
 - Target chip: `esp32c6`
 - Reference board: `ESP32-C6 DevKitC-1`
-- Firmware stack: `ESP-IDF v5.4.1` + pinned `esp-matter` commit `78bc8e21c932a5014a08ecdd8bfa5535a771c107`
-- `connectedhomeip` snapshot under that tree: `326cabf99c0cd2d8e9099ea0a5cc849c8e28dda7`
+- Firmware stack: `ESP-IDF v5.4.1` + `esp-matter release/v1.4`
 - Input model: Anna JSON payloads with `meta` + `data`
 - Action families: `Button`, `Switch`, `ConButton`, `ConSwitch`, `Modes`
 
@@ -38,19 +40,21 @@ Current implementation limits:
 - One `Modes` set per device
 
 This repository is a development/reference firmware runtime.
-Release certification assets, manufacturing credentials, and production provisioning flows are intentionally out of scope for the public firmware tree.
+Manufacturing credentials, production provisioning flows, and release certification asset management are intentionally out of scope for the public firmware tree.
 
 ## Release Status
 
-The current public snapshot is not a production release profile yet.
-It is pinned to a validated development-time `esp-matter` commit rather than an official release branch, and the current firmware configuration still includes development-oriented Matter settings such as example DAC credentials and CHIP shell enablement.
+The current firmware baseline is aligned to the official `esp-matter release/v1.4` branch, but it is still not a production release profile yet.
+The current firmware configuration intentionally keeps development-oriented Matter settings such as example DAC credentials and CHIP shell enablement.
 
-Release alignment is planned.
-The intended direction is to move this firmware onto an official release baseline and replace the current development credential/debug profile with a release-safe configuration.
+Cloud config sync is now functional during Matter commissioning sessions.
+
+Release hardening is still planned.
+The remaining direction is to keep the `release/v1.4` baseline while replacing the current development credential/debug profile with a release-safe configuration.
 
 ## Repository Layout
 
-- `main/`: application entrypoints, Matter integration, commissioning/data providers
+- `main/`: application entrypoints, Matter integration, commissioning/data providers, cloud sync, runtime rebuild, factory reset
 - `components/`: Anna config parsing, storage, runtime helpers, driver support modules
 
 ## Required Root Files
@@ -72,34 +76,30 @@ Without the root build files above, `idf.py build` cannot start.
 
 ## Environment Setup
 
-Use a Linux shell and run the commands below in order.
 The firmware expects a local `esp-matter` checkout referenced by `ESP_MATTER_PATH`; it does not use a registry-only dependency flow.
-For reproducible results, use `ESP-IDF v5.4.1` and the validated `esp-matter` commit `78bc8e21c932a5014a08ecdd8bfa5535a771c107`.
+Clone the repositories and check out the validated baseline:
 
 ```bash
-mkdir -p ~/esp
-cd ~/esp
 git clone -b v5.4.1 --recursive https://github.com/espressif/esp-idf.git
-cd ~/esp/esp-idf
-./install.sh esp32c6
 
-cd ~/esp
 git clone --recursive https://github.com/espressif/esp-matter.git
-cd ~/esp/esp-matter
-git checkout 78bc8e21c932a5014a08ecdd8bfa5535a771c107
-git submodule update --init --recursive
-
-export IDF_PATH=~/esp/esp-idf
-. "$IDF_PATH/export.sh"
-
-export ESP_MATTER_PATH=~/esp/esp-matter
-. "$ESP_MATTER_PATH/export.sh"
-
-export IDF_TARGET=esp32c6
 ```
 
-After the commands above complete, the local shell is ready for Nemo firmware work.
-`CMakeLists.txt` reads `ESP_MATTER_PATH` directly and derives the device HAL path from `IDF_TARGET`.
+Inside the cloned esp-matter directory
+```bash
+git checkout release/v1.4
+git submodule update --init --recursive
+```
+
+After cloning, set up the build environment in your shell:
+
+- Run `./install.sh esp32c6` inside the `esp-idf` directory
+- Source both `esp-idf/export.sh` and `esp-matter/export.sh`
+- Export `ESP_MATTER_PATH` to point to your `esp-matter` checkout
+- Export `IDF_TARGET=esp32c6`
+
+`CMakeLists.txt` reads `ESP_MATTER_PATH` directly.
+If `ESP_MATTER_DEVICE_PATH` is not exported explicitly, the project derives the device HAL path from `IDF_TARGET`.
 
 ## Configuration Model
 
