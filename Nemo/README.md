@@ -19,7 +19,7 @@ Platform concepts and JSON semantics are documented in the top-level Nemo & Anna
 - Matter endpoint, cluster, and label mapping
 - Runtime state storage and restore behavior
 - Factory reset and power-cycle recovery
-- Cloud config sync during Matter commissioning
+- Cloud config sync during Matter commissioning, including delayed `ConnectNetworkResponse` release until sync reaches a terminal result
 - Runtime config rebuild without reboot
 
 ## Current Scope
@@ -28,7 +28,7 @@ Current reference profile:
 
 - Target chip: `esp32c6`
 - Reference board: `ESP32-C6 DevKitC-1`
-- Firmware stack: `ESP-IDF v5.4.1` + `esp-matter release/v1.4`
+- Firmware stack: `ESP-IDF v5.4.1` + `anna-soft/esp-matter` branch `anna/cloud-sync-chip-pin` (derived from `esp-matter release/v1.4`)
 - Input model: Anna JSON payloads with `meta` + `data`
 - Action families: `Button`, `Switch`, `ConButton`, `ConSwitch`, `Modes`
 
@@ -44,13 +44,17 @@ Manufacturing credentials, production provisioning flows, and release certificat
 
 ## Release Status
 
-The current firmware baseline is aligned to the official `esp-matter release/v1.4` branch, but it is still not a production release profile yet.
+The current validated firmware baseline uses `anna-soft/esp-matter` branch `anna/cloud-sync-chip-pin`.
+That branch points its `connectedhomeip` submodule at `anna-soft/connectedhomeip` and pins the matching cloud sync commit required for the commissioning-time `ConnectNetworkResponse` delay and fail-open release path.
 The current firmware configuration intentionally keeps development-oriented Matter settings such as example DAC credentials and CHIP shell enablement.
 
 Cloud config sync is now functional during Matter commissioning sessions.
+On the reference `esp32c6` profile, `ConnectNetworkResponse(Success)` is held until Anna cloud sync reaches a terminal result, with a fail-open release path if the wait cannot be sustained.
+This behavior is controlled by `CONFIG_ANNA_CLOUD_SYNC_CONNECT_RESPONSE_WAIT` and is enabled in `sdkconfig.defaults.esp32c6`.
 
+Official `esp-matter release/v1.4` remains the upstream lineage, but it is not the supported setup baseline for this repository.
 Release hardening is still planned.
-The remaining direction is to keep the `release/v1.4` baseline while replacing the current development credential/debug profile with a release-safe configuration.
+The remaining direction is to stay close to the `release/v1.4` lineage while replacing the current development credential/debug profile with a release-safe configuration.
 
 ## Repository Layout
 
@@ -82,14 +86,13 @@ Clone the repositories and check out the validated baseline:
 ```bash
 git clone -b v5.4.1 --recursive https://github.com/espressif/esp-idf.git
 
-git clone --recursive https://github.com/espressif/esp-matter.git
-```
-
-Inside the cloned esp-matter directory
-```bash
-git checkout release/v1.4
+git clone --recursive https://github.com/anna-soft/esp-matter.git
+cd esp-matter
+git checkout anna/cloud-sync-chip-pin
 git submodule update --init --recursive
 ```
+
+This fork is derived from official `esp-matter release/v1.4` and already points its `connectedhomeip` submodule to `anna-soft/connectedhomeip` with the pinned cloud sync commit required by this firmware.
 
 After cloning, set up the build environment in your shell:
 
@@ -107,9 +110,11 @@ Nemo consumes Anna JSON based configuration payloads.
 At a high level:
 
 - `meta` carries transport and integrity metadata
-- `data.UnitInfo` carries per-device identity
+- `data.UnitInfo` carries per-device identity and cloud sync bootstrap fields such as `UniqueID` and `CloudSync.DeviceToken`
 - `data.ProductInfo` carries product-level identity and user-visible properties
 - action sections define runtime behavior, boundaries, and mode constraints
+
+For commissioning-time cloud sync, Nemo reads bootstrap identity from the stored unit data before issuing device-scoped pull and ack requests.
 
 For detailed JSON schema, field semantics, and runtime policy, see the two documents under `../Anna/`:
 
