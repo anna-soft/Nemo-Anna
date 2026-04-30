@@ -24,6 +24,8 @@
 #include "anna_runtime_rebuild.h"
 #include "anna_state_storage.h"
 
+extern "C" bool anna_network_commissioning_release_connect_network_response(const char *reason) __attribute__((weak));
+
 using chip::DeviceLayer::ChipDeviceEvent;
 using chip::DeviceLayer::DeviceEventType::kCommissioningComplete;
 using chip::DeviceLayer::DeviceEventType::kCommissioningSessionStarted;
@@ -40,6 +42,7 @@ constexpr size_t kSchemaVersionMaxLen = 64;
 constexpr size_t kBaseUrlMaxLen = 256;
 constexpr size_t kAuthHeaderMaxLen = ANNA_MAX_DEVICE_TOKEN_LEN + 16;
 constexpr size_t kResultCodeMaxLen = 40;
+constexpr size_t kReleaseReasonMaxLen = 32;
 constexpr size_t kDebugTraceRingSize = 16;
 
 enum class worker_command_type : uint8_t {
@@ -74,6 +77,14 @@ typedef struct {
     bool test_harness_force_pre_apply_post_fabric_pending;
     int64_t session_started_at_us;
     int64_t sync_attempt_started_at_us;
+    int64_t connect_network_received_at_us;
+    int64_t wifi_connected_at_us;
+    int64_t ip_ready_at_us;
+    int64_t cloud_sync_started_at_us;
+    int64_t cloud_sync_finished_at_us;
+    int64_t connect_response_released_at_us;
+    int64_t hard_cap_no_wifi_success_at_us;
+    char connect_response_release_reason[kReleaseReasonMaxLen];
 } anna_cloud_sync_state_t;
 
 typedef struct {
@@ -93,6 +104,14 @@ typedef struct {
     bool test_harness_force_pull_pending;
     int64_t session_started_at_us;
     int64_t sync_attempt_started_at_us;
+    int64_t connect_network_received_at_us;
+    int64_t wifi_connected_at_us;
+    int64_t ip_ready_at_us;
+    int64_t cloud_sync_started_at_us;
+    int64_t cloud_sync_finished_at_us;
+    int64_t connect_response_released_at_us;
+    int64_t hard_cap_no_wifi_success_at_us;
+    char connect_response_release_reason[kReleaseReasonMaxLen];
     size_t fabric_count;
 } anna_cloud_sync_debug_snapshot_t;
 
@@ -303,6 +322,15 @@ static void capture_debug_snapshot_locked(anna_cloud_sync_debug_snapshot_t *out)
         s_state.test_harness_force_pre_apply_late_pending || s_state.test_harness_force_pre_apply_post_fabric_pending;
     out->session_started_at_us = s_state.session_started_at_us;
     out->sync_attempt_started_at_us = s_state.sync_attempt_started_at_us;
+    out->connect_network_received_at_us = s_state.connect_network_received_at_us;
+    out->wifi_connected_at_us = s_state.wifi_connected_at_us;
+    out->ip_ready_at_us = s_state.ip_ready_at_us;
+    out->cloud_sync_started_at_us = s_state.cloud_sync_started_at_us;
+    out->cloud_sync_finished_at_us = s_state.cloud_sync_finished_at_us;
+    out->connect_response_released_at_us = s_state.connect_response_released_at_us;
+    out->hard_cap_no_wifi_success_at_us = s_state.hard_cap_no_wifi_success_at_us;
+    strlcpy(out->connect_response_release_reason, s_state.connect_response_release_reason,
+            sizeof(out->connect_response_release_reason));
 }
 
 static bool safe_apply_window_closed_locked(void)
@@ -361,6 +389,8 @@ static void log_debug_snapshot(uint32_t event_type, const char *event_name, cons
     ESP_LOGI(TAG,
              "event trace: event_type=%" PRIu32 " event=%s note=%s pull_skip=%s prepared_pull=%d prepared_ack=%d "
              "terminal_candidate=%d default_terminal=%s fabric_count=%u session_ms=%lld attempt_ms=%lld "
+             "connect_ms=%lld wifi_ms=%lld ip_ms=%lld cloud_start_ms=%lld cloud_finish_ms=%lld "
+             "response_release_ms=%lld release_reason=%s hard_cap_no_wifi_ms=%lld "
              "session_open=%d ip_ready=%d current_ip_ready=%d "
              "fabric_committed=%d commissioning_complete=%d session_stopped=%d ble_deinitialized=%d started=%d finished=%d "
              "atomic_apply_started=%d terminal_locked=%d late_ip_fallback=%d primary_seen=%d test_harness_pending=%d",
@@ -369,7 +399,16 @@ static void log_debug_snapshot(uint32_t event_type, const char *event_name, cons
              needs_terminal_close_out ? 1 : 0, default_terminal_result ? default_terminal_result : "-",
              static_cast<unsigned>(snapshot->fabric_count),
              static_cast<long long>(elapsed_ms_since(snapshot->session_started_at_us)),
-             static_cast<long long>(elapsed_ms_since(snapshot->sync_attempt_started_at_us)), snapshot->session_open ? 1 : 0,
+             static_cast<long long>(elapsed_ms_since(snapshot->sync_attempt_started_at_us)),
+             static_cast<long long>(elapsed_ms_since(snapshot->connect_network_received_at_us)),
+             static_cast<long long>(elapsed_ms_since(snapshot->wifi_connected_at_us)),
+             static_cast<long long>(elapsed_ms_since(snapshot->ip_ready_at_us)),
+             static_cast<long long>(elapsed_ms_since(snapshot->cloud_sync_started_at_us)),
+             static_cast<long long>(elapsed_ms_since(snapshot->cloud_sync_finished_at_us)),
+             static_cast<long long>(elapsed_ms_since(snapshot->connect_response_released_at_us)),
+             snapshot->connect_response_release_reason[0] ? snapshot->connect_response_release_reason : "-",
+             static_cast<long long>(elapsed_ms_since(snapshot->hard_cap_no_wifi_success_at_us)),
+             snapshot->session_open ? 1 : 0,
              snapshot->ip_ready ? 1 : 0, snapshot->current_ip_ready ? 1 : 0, snapshot->fabric_committed_seen ? 1 : 0,
              snapshot->commissioning_complete_seen ? 1 : 0, snapshot->session_stopped_seen ? 1 : 0,
              snapshot->ble_deinitialized_seen ? 1 : 0, snapshot->sync_attempt_started ? 1 : 0,
@@ -437,6 +476,8 @@ static void dump_debug_trace_history(const char *reason)
         ESP_LOGI(TAG,
                  "trace history[%u]: event_type=%" PRIu32 " event=%s note=%s pull_skip=%s prepared_pull=%d prepared_ack=%d "
                  "terminal_candidate=%d default_terminal=%s fabric_count=%u session_ms=%lld attempt_ms=%lld "
+                 "connect_ms=%lld wifi_ms=%lld ip_ms=%lld cloud_start_ms=%lld cloud_finish_ms=%lld "
+                 "response_release_ms=%lld release_reason=%s hard_cap_no_wifi_ms=%lld "
                  "session_open=%d ip_ready=%d current_ip_ready=%d fabric_committed=%d commissioning_complete=%d "
                  "session_stopped=%d ble_deinitialized=%d started=%d finished=%d atomic_apply_started=%d terminal_locked=%d "
                  "late_ip_fallback=%d primary_seen=%d test_harness_pending=%d",
@@ -447,6 +488,14 @@ static void dump_debug_trace_history(const char *reason)
                  static_cast<unsigned>(entry.snapshot.fabric_count),
                  static_cast<long long>(elapsed_ms_since(entry.snapshot.session_started_at_us)),
                  static_cast<long long>(elapsed_ms_since(entry.snapshot.sync_attempt_started_at_us)),
+                 static_cast<long long>(elapsed_ms_since(entry.snapshot.connect_network_received_at_us)),
+                 static_cast<long long>(elapsed_ms_since(entry.snapshot.wifi_connected_at_us)),
+                 static_cast<long long>(elapsed_ms_since(entry.snapshot.ip_ready_at_us)),
+                 static_cast<long long>(elapsed_ms_since(entry.snapshot.cloud_sync_started_at_us)),
+                 static_cast<long long>(elapsed_ms_since(entry.snapshot.cloud_sync_finished_at_us)),
+                 static_cast<long long>(elapsed_ms_since(entry.snapshot.connect_response_released_at_us)),
+                 entry.snapshot.connect_response_release_reason[0] ? entry.snapshot.connect_response_release_reason : "-",
+                 static_cast<long long>(elapsed_ms_since(entry.snapshot.hard_cap_no_wifi_success_at_us)),
                  entry.snapshot.session_open ? 1 : 0, entry.snapshot.ip_ready ? 1 : 0,
                  entry.snapshot.current_ip_ready ? 1 : 0, entry.snapshot.fabric_committed_seen ? 1 : 0,
                  entry.snapshot.commissioning_complete_seen ? 1 : 0, entry.snapshot.session_stopped_seen ? 1 : 0,
@@ -489,6 +538,8 @@ static bool prepare_pull_command_locked(bool late_ip_fallback, bool test_harness
     s_state.sync_attempt_started = true;
     s_state.late_ip_fallback_used = late_ip_fallback;
     s_state.sync_attempt_started_at_us = esp_timer_get_time();
+    s_state.cloud_sync_started_at_us = s_state.sync_attempt_started_at_us;
+    s_state.cloud_sync_finished_at_us = 0;
     return true;
 }
 
@@ -531,6 +582,11 @@ static bool prepare_ack_only_command_locked(const char *result_code, bool late_i
     out_cmd->type = worker_command_type::ack_only;
     out_cmd->late_ip_fallback_used = late_ip_fallback_used;
     strlcpy(out_cmd->result_code, result_code, sizeof(out_cmd->result_code));
+    const int64_t now = esp_timer_get_time();
+    if (s_state.cloud_sync_started_at_us == 0) {
+        s_state.cloud_sync_started_at_us = now;
+    }
+    s_state.cloud_sync_finished_at_us = now;
     s_state.sync_attempt_finished = true;
     s_state.terminal_result_locked = true;
     return true;
@@ -843,14 +899,46 @@ static void sync_apply_work(intptr_t arg)
     xTaskNotifyGive(ctx->waiter_task);
 }
 
+static void request_connect_network_response_release(const char *reason)
+{
+    if (!anna_network_commissioning_release_connect_network_response) {
+        ESP_LOGW(TAG, "connect response release skipped: bridge unavailable reason=%s", reason ? reason : "-");
+        return;
+    }
+
+    bool requested = anna_network_commissioning_release_connect_network_response(reason);
+    ESP_LOGI(TAG, "connect response release requested: reason=%s requested=%d", reason ? reason : "-", requested ? 1 : 0);
+}
+
 static void finalize_worker_attempt(bool attempt_started, bool finished)
 {
+    const int64_t now = esp_timer_get_time();
+    bool response_already_released = false;
+    int64_t response_released_at_us = 0;
+    char release_reason[kReleaseReasonMaxLen] = { 0 };
     portENTER_CRITICAL(&s_state_lock);
     if (attempt_started) {
         s_state.sync_attempt_started = true;
+        if (s_state.cloud_sync_started_at_us == 0) {
+            s_state.cloud_sync_started_at_us = now;
+        }
     }
     s_state.sync_attempt_finished = finished;
+    if (finished) {
+        s_state.cloud_sync_finished_at_us = now;
+        response_released_at_us = s_state.connect_response_released_at_us;
+        response_already_released = response_released_at_us > 0;
+        strlcpy(release_reason, s_state.connect_response_release_reason, sizeof(release_reason));
+    }
     portEXIT_CRITICAL(&s_state_lock);
+    if (finished) {
+        if (response_already_released) {
+            ESP_LOGI(TAG, "cloud sync terminal after connect response release: release_reason=%s finish_after_release_ms=%lld",
+                     release_reason[0] ? release_reason : "-",
+                     static_cast<long long>((now - response_released_at_us) / 1000));
+        }
+        request_connect_network_response_release("cloud_sync_done");
+    }
 }
 
 static void send_ack_if_possible(const anna_cloud_bootstrap_t *bootstrap, const char *mac_addr, const char *result_code,
@@ -1026,6 +1114,102 @@ static void worker_task(void *arg)
 }
 } // namespace
 
+extern "C" bool anna_cloud_sync_should_delay_connect_network_response(int64_t connect_received_at_us)
+{
+#if CONFIG_ANNA_CLOUD_SYNC_CONNECT_RESPONSE_WAIT
+    bool should_delay = false;
+    const char *blocked_by = nullptr;
+
+    portENTER_CRITICAL(&s_state_lock);
+    if (connect_received_at_us <= 0) {
+        blocked_by = "invalid_timestamp";
+    } else if (!s_state.session_open) {
+        blocked_by = "session_closed";
+    } else if (safe_apply_window_closed_locked()) {
+        blocked_by = default_close_result_locked();
+    } else if (s_state.sync_attempt_finished) {
+        blocked_by = "attempt_already_finished";
+    } else {
+        should_delay = true;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+
+    ESP_LOGI(TAG, "connect response wait gate: enabled=1 should_delay=%d reason=%s connect_ms=%lld",
+             should_delay ? 1 : 0, blocked_by ? blocked_by : "eligible",
+             static_cast<long long>(elapsed_ms_since(connect_received_at_us)));
+    return should_delay;
+#else
+    ESP_LOGI(TAG, "connect response wait gate: enabled=0 should_delay=0 connect_ms=%lld",
+             static_cast<long long>(elapsed_ms_since(connect_received_at_us)));
+    return false;
+#endif
+}
+
+extern "C" void anna_cloud_sync_note_connect_network_received(int64_t connect_received_at_us)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    s_state.connect_network_received_at_us = connect_received_at_us;
+    s_state.wifi_connected_at_us = 0;
+    s_state.cloud_sync_started_at_us = 0;
+    s_state.cloud_sync_finished_at_us = 0;
+    s_state.connect_response_released_at_us = 0;
+    s_state.hard_cap_no_wifi_success_at_us = 0;
+    s_state.connect_response_release_reason[0] = '\0';
+    portEXIT_CRITICAL(&s_state_lock);
+
+    ESP_LOGI(TAG, "connect network received: connect_ms=%lld",
+             static_cast<long long>(elapsed_ms_since(connect_received_at_us)));
+}
+
+extern "C" void anna_cloud_sync_note_connect_network_wifi_connected(int64_t connect_received_at_us, int64_t wifi_connected_at_us)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    if (s_state.connect_network_received_at_us == 0 && connect_received_at_us > 0) {
+        s_state.connect_network_received_at_us = connect_received_at_us;
+    }
+    s_state.wifi_connected_at_us = wifi_connected_at_us;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    ESP_LOGI(TAG, "connect network Wi-Fi connected: connect_ms=%lld wifi_ms=%lld",
+             static_cast<long long>(elapsed_ms_since(connect_received_at_us)),
+             static_cast<long long>(elapsed_ms_since(wifi_connected_at_us)));
+}
+
+extern "C" void anna_cloud_sync_note_connect_network_hard_cap_no_wifi_success(int64_t connect_received_at_us, int64_t hard_cap_at_us)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    if (s_state.connect_network_received_at_us == 0 && connect_received_at_us > 0) {
+        s_state.connect_network_received_at_us = connect_received_at_us;
+    }
+    s_state.hard_cap_no_wifi_success_at_us = hard_cap_at_us;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    ESP_LOGW(TAG, "connect response hard cap before Wi-Fi success: connect_ms=%lld hard_cap_ms=%lld",
+             static_cast<long long>(elapsed_ms_since(connect_received_at_us)),
+             static_cast<long long>(elapsed_ms_since(hard_cap_at_us)));
+}
+
+extern "C" void anna_cloud_sync_note_connect_network_response_released(int64_t connect_received_at_us, int64_t wifi_connected_at_us,
+                                                                       int64_t response_released_at_us, const char *reason)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    if (s_state.connect_network_received_at_us == 0 && connect_received_at_us > 0) {
+        s_state.connect_network_received_at_us = connect_received_at_us;
+    }
+    if (s_state.wifi_connected_at_us == 0 && wifi_connected_at_us > 0) {
+        s_state.wifi_connected_at_us = wifi_connected_at_us;
+    }
+    s_state.connect_response_released_at_us = response_released_at_us;
+    strlcpy(s_state.connect_response_release_reason, reason ? reason : "unknown",
+            sizeof(s_state.connect_response_release_reason));
+    portEXIT_CRITICAL(&s_state_lock);
+
+    ESP_LOGI(TAG, "connect response released: reason=%s connect_ms=%lld wifi_ms=%lld release_ms=%lld",
+             reason ? reason : "unknown", static_cast<long long>(elapsed_ms_since(connect_received_at_us)),
+             static_cast<long long>(elapsed_ms_since(wifi_connected_at_us)),
+             static_cast<long long>(elapsed_ms_since(response_released_at_us)));
+}
+
 extern "C" void anna_cloud_sync_init(void)
 {
     if (s_worker_queue) {
@@ -1094,6 +1278,9 @@ extern "C" void anna_cloud_sync_handle_device_event(const ChipDeviceEvent *event
             event_note = had_ip ? "ip_assigned_repeat" : "ip_assigned_first";
             s_state.current_ip_ready = true;
             s_state.ip_ready = true;
+            if (s_state.ip_ready_at_us == 0) {
+                s_state.ip_ready_at_us = esp_timer_get_time();
+            }
             prepared_pull = maybe_prepare_pull_command_locked(true, &pending_cmd, &consumed_test_intent);
             if (!prepared_pull) {
                 if (consumed_test_intent == ANNA_CLOUD_SYNC_TEST_INTENT_DEFER_PRIMARY_TO_NEXT_IP) {
@@ -1127,6 +1314,14 @@ extern "C" void anna_cloud_sync_handle_device_event(const ChipDeviceEvent *event
         s_state.primary_condition_observed = false;
         s_state.session_started_at_us = esp_timer_get_time();
         s_state.sync_attempt_started_at_us = 0;
+        s_state.connect_network_received_at_us = 0;
+        s_state.wifi_connected_at_us = 0;
+        s_state.ip_ready_at_us = s_state.current_ip_ready ? s_state.session_started_at_us : 0;
+        s_state.cloud_sync_started_at_us = 0;
+        s_state.cloud_sync_finished_at_us = 0;
+        s_state.connect_response_released_at_us = 0;
+        s_state.hard_cap_no_wifi_success_at_us = 0;
+        s_state.connect_response_release_reason[0] = '\0';
         reset_debug_trace_locked();
         prepared_pull = maybe_prepare_pull_command_locked(false, &pending_cmd, &consumed_test_intent);
         if (!prepared_pull) {

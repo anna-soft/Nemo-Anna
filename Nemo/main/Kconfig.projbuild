@@ -28,6 +28,14 @@ menu "Example Configuration"
         help
             Stack size for the dedicated anna_cloud_sync worker task.
 
+    config ANNA_CLOUD_SYNC_CONNECT_RESPONSE_WAIT
+        bool "Delay Wi-Fi ConnectNetworkResponse for Anna cloud sync"
+        default y
+        help
+            Delay NetworkCommissioning ConnectNetworkResponse(Success)
+            during commissioning until Anna cloud sync reaches a terminal
+            result or the fail-open hard cap releases the response.
+
     config ANNA_CLOUD_SYNC_TEST_HARNESS
         bool "Enable Anna cloud sync test-only harness"
         default n
