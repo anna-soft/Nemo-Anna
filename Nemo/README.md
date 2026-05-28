@@ -20,7 +20,7 @@ Platform concepts and JSON semantics are documented in the top-level Nemo & Anna
 - Runtime state storage and restore behavior
 - Factory reset and power-cycle recovery
 - Cloud config sync during Matter commissioning, including delayed `ConnectNetworkResponse` release until sync reaches a terminal result
-- Runtime config rebuild without reboot
+- Runtime config rebuild without reboot, with endpoint ID reuse for topology-changing updates
 
 ## Current Scope
 
@@ -51,6 +51,10 @@ The current firmware configuration intentionally keeps development-oriented Matt
 Cloud config sync is now functional during Matter commissioning sessions.
 On the reference `esp32c6` profile, `ConnectNetworkResponse(Success)` is held until Anna cloud sync reaches a terminal result, with a fail-open release path if the wait cannot be sustained.
 This behavior is controlled by `CONFIG_ANNA_CLOUD_SYNC_CONNECT_RESPONSE_WAIT` and is enabled in `sdkconfig.defaults.esp32c6`.
+
+Runtime config rebuild now preserves existing endpoint IDs where possible during topology-changing Anna JSON updates.
+When an old endpoint cannot be reused, Nemo tracks it briefly as a retired endpoint for metadata transition handling.
+This is intended to reduce instability during live topology changes without preserving execution behavior for removed actions.
 
 Official `esp-matter release/v1.4` remains the upstream lineage, but it is not the supported setup baseline for this repository.
 Release hardening is still planned.

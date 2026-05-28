@@ -16,12 +16,160 @@ using namespace esp_matter;
 namespace {
 constexpr char TAG[] = "anna_runtime_rb";
 
+enum class transition_slot_kind_t : uint8_t {
+    kMode = 0,
+    kButton,
+    kSwitch,
+    kConBtn,
+    kConSwt,
+};
+
+struct transition_slot_ref_t {
+    transition_slot_kind_t kind = transition_slot_kind_t::kMode;
+    uint8_t index = 0;
+};
+
+struct anna_transition_plan_t {
+    anna_endpoint_reuse_plan_t reuse_plan = {};
+    uint16_t retired_ids[ANNA_MAX_DYNAMIC_ENDPOINT_COUNT] = {};
+    size_t retired_count = 0;
+    uint16_t reused_ids[ANNA_MAX_DYNAMIC_ENDPOINT_COUNT] = {};
+    size_t reused_count = 0;
+};
+
+struct anna_compat_window_state_t {
+    bool active = false;
+    int64_t opened_at_us = 0;
+    uint32_t generation = 0;
+    uint16_t retired_ids[ANNA_MAX_DYNAMIC_ENDPOINT_COUNT] = {};
+    size_t retired_count = 0;
+};
+
+constexpr uint32_t kCompatHardCapMs = 120000;
+
+static anna_compat_window_state_t s_compat_window = {};
+static uint32_t s_compat_generation_counter = 0;
+
 static void clear_reuse_plan(anna_endpoint_reuse_plan_t *plan)
 {
     if (!plan) {
         return;
     }
     memset(plan, ENDPOINT_ID_INVALID, sizeof(*plan));
+}
+
+static bool contains_endpoint_id(const uint16_t *ids, size_t count, uint16_t endpoint_id)
+{
+    if (!ids || endpoint_id == ENDPOINT_ID_INVALID || endpoint_id == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (ids[i] == endpoint_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool append_unique_endpoint_id(uint16_t *ids, size_t *count, uint16_t endpoint_id)
+{
+    if (!ids || !count || endpoint_id == ENDPOINT_ID_INVALID || endpoint_id == 0) {
+        return false;
+    }
+    if (contains_endpoint_id(ids, *count, endpoint_id)) {
+        return true;
+    }
+    if (*count >= ANNA_MAX_DYNAMIC_ENDPOINT_COUNT) {
+        return false;
+    }
+    ids[*count] = endpoint_id;
+    (*count)++;
+    return true;
+}
+
+static void sort_endpoint_ids_ascending(uint16_t *ids, size_t count)
+{
+    if (!ids) {
+        return;
+    }
+    for (size_t i = 1; i < count; ++i) {
+        uint16_t key = ids[i];
+        size_t j = i;
+        while (j > 0 && ids[j - 1] > key) {
+            ids[j] = ids[j - 1];
+            --j;
+        }
+        ids[j] = key;
+    }
+}
+
+static uint16_t *reuse_slot_ptr(anna_endpoint_reuse_plan_t *plan, transition_slot_ref_t slot)
+{
+    if (!plan) {
+        return nullptr;
+    }
+
+    switch (slot.kind) {
+    case transition_slot_kind_t::kMode:
+        return (slot.index < ANNA_MAX_MODE_COUNT) ? &plan->mode[slot.index] : nullptr;
+    case transition_slot_kind_t::kButton:
+        return (slot.index < ANNA_MAX_BUTTON) ? &plan->button[slot.index] : nullptr;
+    case transition_slot_kind_t::kSwitch:
+        return (slot.index < ANNA_MAX_SWITCH) ? &plan->swt[slot.index] : nullptr;
+    case transition_slot_kind_t::kConBtn:
+        return (slot.index < ANNA_MAX_CON_ACT) ? &plan->con_btn[slot.index] : nullptr;
+    case transition_slot_kind_t::kConSwt:
+        return (slot.index < ANNA_MAX_CON_SWT_ACT) ? &plan->con_swt[slot.index] : nullptr;
+    default:
+        return nullptr;
+    }
+}
+
+static uint16_t reuse_slot_value(const anna_endpoint_reuse_plan_t *plan, transition_slot_ref_t slot)
+{
+    if (!plan) {
+        return ENDPOINT_ID_INVALID;
+    }
+
+    switch (slot.kind) {
+    case transition_slot_kind_t::kMode:
+        return (slot.index < ANNA_MAX_MODE_COUNT) ? plan->mode[slot.index] : static_cast<uint16_t>(ENDPOINT_ID_INVALID);
+    case transition_slot_kind_t::kButton:
+        return (slot.index < ANNA_MAX_BUTTON) ? plan->button[slot.index] : static_cast<uint16_t>(ENDPOINT_ID_INVALID);
+    case transition_slot_kind_t::kSwitch:
+        return (slot.index < ANNA_MAX_SWITCH) ? plan->swt[slot.index] : static_cast<uint16_t>(ENDPOINT_ID_INVALID);
+    case transition_slot_kind_t::kConBtn:
+        return (slot.index < ANNA_MAX_CON_ACT) ? plan->con_btn[slot.index] : static_cast<uint16_t>(ENDPOINT_ID_INVALID);
+    case transition_slot_kind_t::kConSwt:
+        return (slot.index < ANNA_MAX_CON_SWT_ACT) ? plan->con_swt[slot.index] : static_cast<uint16_t>(ENDPOINT_ID_INVALID);
+    default:
+        return ENDPOINT_ID_INVALID;
+    }
+}
+
+static bool transition_reuse_mark(anna_endpoint_reuse_plan_t *plan, uint16_t *reused_ids, size_t *reused_count,
+                                  transition_slot_ref_t slot, uint16_t endpoint_id)
+{
+    if (!plan || !reused_ids || !reused_count || endpoint_id == ENDPOINT_ID_INVALID || endpoint_id == 0) {
+        return false;
+    }
+
+    uint16_t *slot_ptr = reuse_slot_ptr(plan, slot);
+    if (!slot_ptr || *slot_ptr != ENDPOINT_ID_INVALID) {
+        return false;
+    }
+
+    *slot_ptr = endpoint_id;
+    return append_unique_endpoint_id(reused_ids, reused_count, endpoint_id);
+}
+
+static void clear_transition_plan(anna_transition_plan_t *plan)
+{
+    if (!plan) {
+        return;
+    }
+    *plan = anna_transition_plan_t{};
+    clear_reuse_plan(&plan->reuse_plan);
 }
 
 static bool same_modes_topology(const anna_modes_t *lhs, const anna_modes_t *rhs)
@@ -188,6 +336,116 @@ static void collect_dynamic_endpoint_ids(const anna_cfg_t *cfg, uint16_t *ids, s
     }
 }
 
+static void collect_dynamic_endpoint_ids_sorted(const anna_cfg_t *cfg, uint16_t *ids, size_t *count)
+{
+    collect_dynamic_endpoint_ids(cfg, ids, count);
+    sort_endpoint_ids_ascending(ids, count ? *count : 0);
+}
+
+static void collect_candidate_slots(const anna_cfg_t *cfg, transition_slot_ref_t *slots, size_t *count)
+{
+    if (!slots || !count) {
+        return;
+    }
+    *count = 0;
+    if (!cfg) {
+        return;
+    }
+
+    auto append_slot = [&](transition_slot_kind_t kind, int index) {
+        if (*count >= ANNA_MAX_DYNAMIC_ENDPOINT_COUNT) {
+            return;
+        }
+        slots[*count].kind = kind;
+        slots[*count].index = static_cast<uint8_t>(index);
+        (*count)++;
+    };
+
+    for (int i = 0; i < cfg->modes.mode_count && i < ANNA_MAX_MODE_COUNT; ++i) {
+        append_slot(transition_slot_kind_t::kMode, i);
+    }
+    for (int i = 0; i < cfg->button_cnt && i < ANNA_MAX_BUTTON; ++i) {
+        append_slot(transition_slot_kind_t::kButton, i);
+    }
+    for (int i = 0; i < cfg->switch_cnt && i < ANNA_MAX_SWITCH; ++i) {
+        append_slot(transition_slot_kind_t::kSwitch, i);
+    }
+    for (int i = 0; i < cfg->con_btn_cnt && i < ANNA_MAX_CON_ACT; ++i) {
+        append_slot(transition_slot_kind_t::kConBtn, i);
+    }
+    for (int i = 0; i < cfg->con_swt_cnt && i < ANNA_MAX_CON_SWT_ACT; ++i) {
+        append_slot(transition_slot_kind_t::kConSwt, i);
+    }
+}
+
+static void build_transition_plan(const anna_cfg_t *current, const anna_cfg_t *candidate, anna_transition_plan_t *plan)
+{
+    clear_transition_plan(plan);
+    if (!current || !candidate || !plan) {
+        return;
+    }
+
+    auto mark_same_type_prefix = [&](transition_slot_kind_t kind, int current_count, int candidate_count, auto endpoint_id_getter) {
+        int shared = (current_count < candidate_count) ? current_count : candidate_count;
+        for (int i = 0; i < shared; ++i) {
+            transition_slot_ref_t slot = { kind, static_cast<uint8_t>(i) };
+            (void)transition_reuse_mark(&plan->reuse_plan, plan->reused_ids, &plan->reused_count, slot, endpoint_id_getter(i));
+        }
+    };
+
+    mark_same_type_prefix(transition_slot_kind_t::kMode, current->modes.mode_count, candidate->modes.mode_count,
+                          [&](int i) { return current->modes.endpoint_id[i]; });
+    mark_same_type_prefix(transition_slot_kind_t::kButton, current->button_cnt, candidate->button_cnt,
+                          [&](int i) { return current->a_button[i].base.endpoint_id; });
+    mark_same_type_prefix(transition_slot_kind_t::kSwitch, current->switch_cnt, candidate->switch_cnt,
+                          [&](int i) { return current->a_switch[i].base.endpoint_id; });
+    mark_same_type_prefix(transition_slot_kind_t::kConBtn, current->con_btn_cnt, candidate->con_btn_cnt,
+                          [&](int i) { return current->con_btn[i].base.endpoint_id; });
+    mark_same_type_prefix(transition_slot_kind_t::kConSwt, current->con_swt_cnt, candidate->con_swt_cnt,
+                          [&](int i) { return current->con_swt[i].base.endpoint_id; });
+
+    uint16_t old_ids[ANNA_MAX_DYNAMIC_ENDPOINT_COUNT] = {};
+    size_t old_count = 0;
+    collect_dynamic_endpoint_ids_sorted(current, old_ids, &old_count);
+
+    transition_slot_ref_t candidate_slots[ANNA_MAX_DYNAMIC_ENDPOINT_COUNT] = {};
+    size_t candidate_slot_count = 0;
+    collect_candidate_slots(candidate, candidate_slots, &candidate_slot_count);
+
+    size_t old_idx = 0;
+    for (size_t i = 0; i < candidate_slot_count; ++i) {
+        transition_slot_ref_t slot = candidate_slots[i];
+        if (reuse_slot_value(&plan->reuse_plan, slot) != ENDPOINT_ID_INVALID) {
+            continue;
+        }
+
+        while (old_idx < old_count && contains_endpoint_id(plan->reused_ids, plan->reused_count, old_ids[old_idx])) {
+            ++old_idx;
+        }
+
+        if (old_idx < old_count) {
+            (void)transition_reuse_mark(&plan->reuse_plan, plan->reused_ids, &plan->reused_count, slot, old_ids[old_idx]);
+            ++old_idx;
+        }
+    }
+
+    for (size_t i = 0; i < old_count; ++i) {
+        if (!contains_endpoint_id(plan->reused_ids, plan->reused_count, old_ids[i])) {
+            (void)append_unique_endpoint_id(plan->retired_ids, &plan->retired_count, old_ids[i]);
+        }
+    }
+}
+
+static bool is_descriptor_allowlisted_attribute(uint32_t attribute_id)
+{
+    return attribute_id == Descriptor::Attributes::DeviceTypeList::Id ||
+            attribute_id == Descriptor::Attributes::ServerList::Id ||
+            attribute_id == Descriptor::Attributes::ClientList::Id ||
+            attribute_id == Descriptor::Attributes::PartsList::Id ||
+            attribute_id == Globals::Attributes::FeatureMap::Id ||
+            attribute_id == Globals::Attributes::ClusterRevision::Id;
+}
+
 static esp_err_t destroy_dynamic_endpoints(const anna_cfg_t *cfg)
 {
     node_t *node = app_settings_get_runtime_node();
@@ -282,6 +540,74 @@ static char *load_schema_copy()
     return buf;
 }
 
+static void compat_window_reset_state()
+{
+    s_compat_window = anna_compat_window_state_t{};
+}
+
+static void compat_window_close_now(const char *reason)
+{
+    if (!s_compat_window.active) {
+        return;
+    }
+
+    uint16_t retired_ids[ANNA_MAX_DYNAMIC_ENDPOINT_COUNT] = {};
+    size_t retired_count = s_compat_window.retired_count;
+    uint32_t generation = s_compat_window.generation;
+    int64_t open_ms = 0;
+    memcpy(retired_ids, s_compat_window.retired_ids, sizeof(retired_ids));
+    if (s_compat_window.opened_at_us > 0) {
+        open_ms = (esp_timer_get_time() - s_compat_window.opened_at_us) / 1000;
+    }
+
+    s_compat_window.active = false;
+    s_compat_window.opened_at_us = 0;
+    s_compat_window.generation = 0;
+    memset(s_compat_window.retired_ids, 0, sizeof(s_compat_window.retired_ids));
+    s_compat_window.retired_count = 0;
+
+    ESP_LOGI(TAG, "metadata-only window close: reason=%s retired_count=%u generation=%" PRIu32 " open_ms=%lld",
+             reason ? reason : "unknown", static_cast<unsigned>(retired_count), generation, static_cast<long long>(open_ms));
+    for (size_t i = 0; i < retired_count; ++i) {
+        ESP_LOGI(TAG, "metadata-only retired endpoint[%u]=%u", static_cast<unsigned>(i), static_cast<unsigned>(retired_ids[i]));
+    }
+}
+
+static void compat_window_open(const anna_transition_plan_t *plan)
+{
+    if (!plan || plan->retired_count == 0) {
+        return;
+    }
+
+    compat_window_close_now("superseded");
+
+    s_compat_window.opened_at_us = esp_timer_get_time();
+    s_compat_window.generation = ++s_compat_generation_counter;
+    s_compat_window.retired_count = plan->retired_count;
+    memcpy(s_compat_window.retired_ids, plan->retired_ids, sizeof(plan->retired_ids));
+    s_compat_window.active = true;
+
+    ESP_LOGI(TAG, "metadata-only window open: retired_count=%u generation=%" PRIu32 " hard_cap_ms=%u",
+             static_cast<unsigned>(s_compat_window.retired_count), s_compat_window.generation,
+             static_cast<unsigned>(kCompatHardCapMs));
+    for (size_t i = 0; i < s_compat_window.retired_count; ++i) {
+        ESP_LOGI(TAG, "metadata-only retired endpoint[%u]=%u", static_cast<unsigned>(i),
+                 static_cast<unsigned>(s_compat_window.retired_ids[i]));
+    }
+}
+
+static void compat_window_lazy_close_if_expired()
+{
+    if (!s_compat_window.active || s_compat_window.opened_at_us <= 0) {
+        return;
+    }
+
+    int64_t age_ms = (esp_timer_get_time() - s_compat_window.opened_at_us) / 1000;
+    if (age_ms > static_cast<int64_t>(kCompatHardCapMs)) {
+        compat_window_close_now("hard_cap");
+    }
+}
+
 static esp_err_t rollback_rebuild(const anna_cfg_t *old_cfg, const char *failure_stage)
 {
     if (!old_cfg) {
@@ -290,6 +616,7 @@ static esp_err_t rollback_rebuild(const anna_cfg_t *old_cfg, const char *failure
 
     ESP_LOGW(TAG, "rollback rebuild start: stage=%s", failure_stage ? failure_stage : "unknown");
     (void)destroy_dynamic_endpoints(&g_anna_cfg);
+    compat_window_reset_state();
     app_settings_clear_runtime_state();
     app_driver_runtime_clear_state();
 
@@ -310,6 +637,36 @@ static esp_err_t rollback_rebuild(const anna_cfg_t *old_cfg, const char *failure
 }
 } // namespace
 
+extern "C" bool anna_topology_map_retired_unsupported_status(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id,
+                                                              uint8_t *out_status)
+{
+    if (!out_status) {
+        return false;
+    }
+
+    compat_window_lazy_close_if_expired();
+    if (!s_compat_window.active) {
+        return false;
+    }
+    if (!contains_endpoint_id(s_compat_window.retired_ids, s_compat_window.retired_count, endpoint_id)) {
+        return false;
+    }
+    if (cluster_id != Descriptor::Id || !is_descriptor_allowlisted_attribute(attribute_id)) {
+        return false;
+    }
+
+    *out_status = static_cast<uint8_t>(chip::Protocols::InteractionModel::Status::UnsupportedAttribute);
+    int64_t age_ms = 0;
+    if (s_compat_window.opened_at_us > 0) {
+        age_ms = (esp_timer_get_time() - s_compat_window.opened_at_us) / 1000;
+    }
+    ESP_LOGI(TAG,
+             "retired tolerance hit: ep=%u cluster=0x%08" PRIx32 " attr=0x%08" PRIx32 " status=0x%02x age_ms=%lld generation=%" PRIu32,
+             static_cast<unsigned>(endpoint_id), cluster_id, attribute_id, static_cast<unsigned>(*out_status),
+             static_cast<long long>(age_ms), s_compat_window.generation);
+    return true;
+}
+
 extern "C" esp_err_t anna_cfg_diff_build(const anna_cfg_t *current, const anna_cfg_t *candidate, anna_cfg_diff_t *out_diff,
                                           anna_endpoint_reuse_plan_t *out_reuse_plan)
 {
@@ -319,6 +676,7 @@ extern "C" esp_err_t anna_cfg_diff_build(const anna_cfg_t *current, const anna_c
 
     memset(out_diff, 0, sizeof(*out_diff));
     clear_reuse_plan(out_reuse_plan);
+    anna_transition_plan_t transition_plan = {};
 
     out_diff->slot_layout_changed = current->modes.mode_count != candidate->modes.mode_count ||
             current->button_cnt != candidate->button_cnt || current->switch_cnt != candidate->switch_cnt ||
@@ -402,6 +760,10 @@ extern "C" esp_err_t anna_cfg_diff_build(const anna_cfg_t *current, const anna_c
 
     same_labels_and_product_info(current, candidate, out_diff);
     out_diff->non_topology_only = !out_diff->topology_changing && (out_diff->label_changed || out_diff->product_info_changed);
+    if (out_diff->topology_changing && out_reuse_plan) {
+        build_transition_plan(current, candidate, &transition_plan);
+        *out_reuse_plan = transition_plan.reuse_plan;
+    }
     return ESP_OK;
 }
 
@@ -419,6 +781,7 @@ extern "C" esp_err_t anna_runtime_apply_candidate(const char *candidate_raw_json
     anna_cfg_t *candidate_cfg = static_cast<anna_cfg_t *>(calloc(1, sizeof(*candidate_cfg)));
     anna_cfg_diff_t diff = {};
     anna_endpoint_reuse_plan_t reuse_plan = {};
+    anna_transition_plan_t transition_plan = {};
     char *old_raw_json = load_blob_copy(anna_cfg_load_raw_from_nvs);
     char *old_schema_version = load_schema_copy();
     int64_t apply_started_at_us = 0;
@@ -459,6 +822,9 @@ extern "C" esp_err_t anna_runtime_apply_candidate(const char *candidate_raw_json
         goto cleanup;
     }
     out_result->diff = diff;
+    if (diff.topology_changing) {
+        build_transition_plan(old_cfg, candidate_cfg, &transition_plan);
+    }
 
     ESP_LOGI(TAG,
              "diff ready: old_sw=%" PRIu32 " candidate_sw=%" PRIu32 " parse_ms=%lld diff_ms=%lld diff[topology=%d non_topology_only=%d "
@@ -553,6 +919,9 @@ extern "C" esp_err_t anna_runtime_apply_candidate(const char *candidate_raw_json
 
     out_result->result_code = ANNA_RESULT_CODE_APPLIED;
     out_result->applied_software_version = candidate_cfg->product_info.sw_ver;
+    if (diff.topology_changing) {
+        compat_window_open(&transition_plan);
+    }
     ESP_LOGI(TAG,
              "apply timing: result=APPLIED old_sw=%" PRIu32 " candidate_sw=%" PRIu32 " parse_ms=%lld diff_ms=%lld "
              "destroy_ms=%lld rebuild_ms=%lld attrs_ms=%lld save_ms=%lld total_ms=%lld diff[topology=%d non_topology_only=%d "

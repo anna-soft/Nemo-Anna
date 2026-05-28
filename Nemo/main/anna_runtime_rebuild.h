@@ -42,6 +42,8 @@ esp_err_t anna_cfg_diff_build(const anna_cfg_t *current, const anna_cfg_t *candi
 esp_err_t anna_runtime_apply_candidate(const char *candidate_raw_json, const char *candidate_schema_version,
                                        anna_runtime_pre_apply_guard_fn pre_apply_guard, void *pre_apply_guard_ctx,
                                        anna_runtime_apply_result_t *out_result);
+bool anna_topology_map_retired_unsupported_status(uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id,
+                                                  uint8_t *out_status);
 
 #ifdef __cplusplus
 }
